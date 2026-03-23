@@ -8,14 +8,28 @@ Root: /nfs/turbo/coe-chaijy/jungchun/vault/a-architecture/sandbox/fragment-compl
 Python 3.x, PyTorch, NumPy, Hydra, uv, Slurm
 
 ## Key Paths
-  fragment-completion/                                                                                                                   
+  fragment-completion/          
   ├── run.py              # main entry point
   ├── configs/            # Hydra configs (don't modify without permission)
   ├── experiments/        # unit experiments and utils
   ├── models/             # models (ignore other subfolders)
   ├── scripts/            # scripts for running experiments and testing
   ├── results/            # output results
+  │   ├── results.json        # aggregated metrics
+  │   ├── all_encoders/       # multi-encoder comparisons
+  │   ├── encoders/           # per-encoder results (clip, dino_v1, dinov2, mae, ...)
+  │   ├── image_types/        # by variant (original, gray, lined)
+  │   ├── visualization/      # generated plots
+  │   └── deprecated/         # legacy experiment runs
   └── analysis/           # plotting, analysis, visualization
+
+## Datasets
+- **Fragment V2** (primary): 260 white-background object images, 3 variants each (original, gray, lined)
+  - Path: `data/fragment_v2/`
+  - Metadata: `metadata.json` (image IDs, names, categories)
+- **ADE20K** (secondary): 109 validation images, ~40 scene classes
+  - Path: `/nfs/turbo/coe-chaijy/jungchun/vault/a-MI/p-visual-grounding/vit-object-binding/libs/ADE20K/dataset/ADE20K_2021_17_01`
+- Access via `src/dataset.py`: `get_dataset(name, root, image_type)`
 
 ## Run Experiments
 ```bash
