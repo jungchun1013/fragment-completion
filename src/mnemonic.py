@@ -7,13 +7,7 @@ import torch.nn.functional as F
 from wrappers.encoder import BaseEncoder
 
 from .masking import get_mask_levels, get_visibility_ratio, mask_pil_image
-
-
-def _embed_pil(encoder: BaseEncoder, pil, transform) -> torch.Tensor:
-    """Extract [D] feature vector from a PIL image."""
-    img_t = transform(pil).unsqueeze(0).to(encoder.device)
-    feat = encoder.extract_features(img_t)  # [1, D]
-    return feat[0].cpu()
+from .utils import embed_pil
 
 
 @torch.no_grad()
@@ -49,7 +43,7 @@ def evaluate_mnemonic(
     complete_embeds = []
     for i in range(n):
         pil = dataset[i]["image_pil"]
-        complete_embeds.append(_embed_pil(encoder, pil, transform))
+        complete_embeds.append(embed_pil(encoder, pil, transform))
     complete_mat = torch.stack(complete_embeds)  # [N, D]
     complete_mat = F.normalize(complete_mat, dim=-1)
 
@@ -63,7 +57,7 @@ def evaluate_mnemonic(
             sample = dataset[i]
             masked = mask_pil_image(sample["image_pil"], L, sample["seg_mask"],
                                     seed=seed, idx=i)
-            masked_embeds.append(_embed_pil(encoder, masked, transform))
+            masked_embeds.append(embed_pil(encoder, masked, transform))
 
         masked_mat = torch.stack(masked_embeds)  # [N, D]
         masked_mat = F.normalize(masked_mat, dim=-1)

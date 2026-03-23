@@ -7,52 +7,9 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 from wrappers.encoder import BaseEncoder
-from src.utils import _extract_patch_features
 
 from .masking import get_mask_levels, get_visibility_ratio, mask_pil_image
-
-
-def _get_encoder_geometry(encoder: BaseEncoder) -> tuple[int, int]:
-    """Return (image_size, patch_size) for the encoder's native resolution."""
-    model = encoder.model
-
-    # timm models (DINOv2, SigLIP, ViT-sup, ResNet, MAE-FT)
-    if hasattr(model, "patch_embed"):
-        pe = model.patch_embed
-        if hasattr(pe, "img_size"):
-            img_sz = pe.img_size
-            img_size = img_sz[0] if isinstance(img_sz, (tuple, list)) else img_sz
-        else:
-            img_size = 224
-        if hasattr(pe, "patch_size"):
-            ps = pe.patch_size
-            patch_size = ps[0] if isinstance(ps, (tuple, list)) else ps
-        else:
-            patch_size = pe.proj.kernel_size[0]
-        return img_size, patch_size
-
-    # HuggingFace models (MAE, I-JEPA, NEPA)
-    if hasattr(model, "config"):
-        cfg = model.config
-        img_size = getattr(cfg, "image_size", 224)
-        patch_size = getattr(cfg, "patch_size", 16)
-        return img_size, patch_size
-
-    # OpenCLIP CLIP
-    if hasattr(model, "visual"):
-        v = model.visual
-        if hasattr(v, "trunk") and hasattr(v.trunk, "patch_embed"):
-            pe = v.trunk.patch_embed
-            img_sz = pe.img_size
-            img_size = img_sz[0] if isinstance(img_sz, (tuple, list)) else img_sz
-            ps = pe.patch_size
-            patch_size = ps[0] if isinstance(ps, (tuple, list)) else ps
-            return img_size, patch_size
-        if hasattr(v, "conv1"):
-            patch_size = v.conv1.kernel_size[0]
-            return 224, patch_size
-
-    return 224, 16
+from .utils import extract_patch_features, get_encoder_geometry
 
 
 def _segment_iou(
@@ -67,7 +24,7 @@ def _segment_iou(
     """
     import torch.nn.functional as F
 
-    patch_feats = _extract_patch_features(encoder, masked_pil)  # [N, D]
+    patch_feats = extract_patch_features(encoder, masked_pil)  # [N, D]
     N, D = patch_feats.shape
     gh = gw = int(round(N ** 0.5))
     if gh * gw != N:
@@ -126,7 +83,7 @@ def evaluate_gestalt(
     levels = get_mask_levels()
     ious = {L: [] for L in levels}
     sils = {L: [] for L in levels}
-    img_size, patch_size = _get_encoder_geometry(encoder)
+    img_size, patch_size = get_encoder_geometry(encoder)
 
     n = min(len(dataset), max_images) if max_images else len(dataset)
     for i in range(n):
@@ -223,7 +180,7 @@ def visualize_gestalt_single(
     # Rows 1..N: encoder segmentation overlays
     for i, enc_name in enumerate(enc_names):
         encoder = encoders[enc_name]
-        img_size, patch_size = _get_encoder_geometry(encoder)
+        img_size, patch_size = get_encoder_geometry(encoder)
 
         for j, L in enumerate(levels):
             ax = axes[1 + i, j]

@@ -12,13 +12,7 @@ import open_clip
 from wrappers.encoder import BaseEncoder
 
 from .masking import get_mask_levels, get_visibility_ratio, mask_pil_image
-
-
-def _embed_pil(encoder: BaseEncoder, pil, transform) -> torch.Tensor:
-    """Extract [D] feature vector from a PIL image."""
-    img_t = transform(pil).unsqueeze(0).to(encoder.device)
-    feat = encoder.extract_features(img_t)  # [1, D]
-    return feat[0].cpu()
+from .utils import embed_pil
 
 
 @torch.no_grad()
@@ -61,7 +55,7 @@ def evaluate_semantic(
     cat_ids = []
     for i in range(n):
         sample = dataset[i]
-        complete_embeds.append(_embed_pil(encoder, sample["image_pil"], transform))
+        complete_embeds.append(embed_pil(encoder, sample["image_pil"], transform))
         cat_ids.append(sample["scene_id"])
 
     complete_mat = torch.stack(complete_embeds)  # [N, D]
@@ -96,7 +90,7 @@ def evaluate_semantic(
             masked = mask_pil_image(
                 sample["image_pil"], L, sample["seg_mask"], seed=seed, idx=i
             )
-            embed = _embed_pil(encoder, masked, transform)
+            embed = embed_pil(encoder, masked, transform)
             masked_embeds.append(F.normalize(embed.unsqueeze(0), dim=-1))
 
         run_accs = []
@@ -138,7 +132,7 @@ def evaluate_semantic(
                 masked = mask_pil_image(
                     sample["image_pil"], L, sample["seg_mask"], seed=seed, idx=i
                 )
-                embed = _embed_pil(encoder, masked, transform)
+                embed = embed_pil(encoder, masked, transform)
                 masked_embeds.append(F.normalize(embed.unsqueeze(0), dim=-1))
 
             run_accs = []

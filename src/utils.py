@@ -1,25 +1,14 @@
-"""Plotting and I/O utilities for completion experiments."""
+"""Shared utilities for fragment-completion experiments.
 
-import json
-from pathlib import Path
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-from .masking import get_mask_levels, get_visibility_ratio
-
-"""Progressive fragment-completion segmentation via patch features.
-
-Algorithm (mirrors fragment_v2 logic at the encoder patch level):
-1. Extract ALL patch features from the original image
-2. Identify "object patches" — those overlapping non-white pixels
-3. At each level L, reveal P = 0.7^(8-L) of object patches (exponential schedule)
-4. Run 2-means on only the revealed patches
-5. Assign cluster labels, map back to full grid, compute IoU
-
-Output: a plot of mean IoU vs fragmentation level (1–8).
+Contains:
+  - Feature extraction helpers (embed_pil, extract_patch_features, encoder geometry)
+  - Ground-truth mask and patch index helpers
+  - Progressive segmentation (patch-level 2-means + IoU)
+  - Plotting and I/O
+  - JSON helpers (fix_json_keys, extract_val, extract_std)
 """
 
+import json
 import random
 from pathlib import Path
 
@@ -31,47 +20,82 @@ from sklearn.cluster import KMeans
 
 from wrappers.encoder import BaseEncoder
 
-# --------------------------------------------------------------------------- #
-# Ground-truth mask from original image
-# --------------------------------------------------------------------------- #
+from .masking import get_mask_levels, get_visibility_ratio
 
-def _get_foreground_mask(image: np.ndarray, threshold: int = 250) -> np.ndarray:
-    """Binary mask: 1 = foreground (non-white), 0 = background."""
-    bg = np.all(image >= threshold, axis=-1)  # [H, W]
-    return (~bg).astype(np.float32)
+# ---------------------------------------------------------------------------
+# Embedding helpers
+# ---------------------------------------------------------------------------
+
+def embed_pil(encoder: BaseEncoder, pil, transform) -> torch.Tensor:
+    """Extract [D] feature vector from a PIL image."""
+    img_t = transform(pil).unsqueeze(0).to(encoder.device)
+    feat = encoder.extract_features(img_t)  # [1, D]
+    return feat[0].cpu()
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Encoder geometry
+# ---------------------------------------------------------------------------
+
+def get_encoder_geometry(encoder: BaseEncoder) -> tuple[int, int]:
+    """Return (image_size, patch_size) for the encoder's native resolution."""
+    model = encoder.model
+
+    # timm models (DINOv2, SigLIP, ViT-sup, ResNet, MAE-FT)
+    if hasattr(model, "patch_embed"):
+        pe = model.patch_embed
+        if hasattr(pe, "img_size"):
+            img_sz = pe.img_size
+            img_size = img_sz[0] if isinstance(img_sz, (tuple, list)) else img_sz
+        else:
+            img_size = 224
+        if hasattr(pe, "patch_size"):
+            ps = pe.patch_size
+            patch_size = ps[0] if isinstance(ps, (tuple, list)) else ps
+        else:
+            patch_size = pe.proj.kernel_size[0]
+        return img_size, patch_size
+
+    # HuggingFace models (MAE, I-JEPA, NEPA)
+    if hasattr(model, "config"):
+        cfg = model.config
+        img_size = getattr(cfg, "image_size", 224)
+        patch_size = getattr(cfg, "patch_size", 16)
+        return img_size, patch_size
+
+    # OpenCLIP CLIP
+    if hasattr(model, "visual"):
+        v = model.visual
+        if hasattr(v, "trunk") and hasattr(v.trunk, "patch_embed"):
+            pe = v.trunk.patch_embed
+            img_sz = pe.img_size
+            img_size = img_sz[0] if isinstance(img_sz, (tuple, list)) else img_sz
+            ps = pe.patch_size
+            patch_size = ps[0] if isinstance(ps, (tuple, list)) else ps
+            return img_size, patch_size
+        if hasattr(v, "conv1"):
+            patch_size = v.conv1.kernel_size[0]
+            return 224, patch_size
+
+    return 224, 16
+
+
+def get_patch_grid_size(encoder: BaseEncoder) -> tuple[int, int]:
+    """Return (gh, gw) — the spatial grid of patches for the encoder."""
+    img_size, patch_size = get_encoder_geometry(encoder)
+    g = img_size // patch_size
+    return (g, g)
+
+
+# ---------------------------------------------------------------------------
 # Patch feature extraction — multi-encoder support
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
 _transform_cache: dict[str, object] = {}
 
 
-def _get_patch_grid_size(encoder: BaseEncoder) -> tuple[int, int]:
-    """Return (gh, gw) — the spatial grid of patches for the encoder."""
-    model = encoder.model
-    if hasattr(model, "patch_embed") and hasattr(model.patch_embed, "grid_size"):
-        return tuple(model.patch_embed.grid_size)
-    if hasattr(model, "config") and hasattr(model.config, "image_size"):
-        ps = model.config.patch_size
-        img_sz = model.config.image_size
-        g = img_sz // ps
-        return (g, g)
-    # CLIP visual
-    if hasattr(model, "visual"):
-        v = model.visual
-        if hasattr(v, "conv1"):
-            # infer from conv1 kernel
-            ps = v.conv1.kernel_size[0]
-            # need input size — assume 224
-            g = 224 // ps
-            return (g, g)
-    return (14, 14)  # fallback
-
-
 @torch.no_grad()
-def _extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> torch.Tensor:
+def extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> torch.Tensor:
     """Extract patch-level features from a single image.
 
     Returns [N_patches, D] tensor (excluding CLS/prefix tokens).
@@ -91,10 +115,15 @@ def _extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> tor
         output = model(pixel_values=img_t)
         return output.last_hidden_state[:, 1:][0].cpu()
 
-    # HuggingFace I-JEPA / NEPA (no CLS token — all tokens are patches)
-    if name in ("I-JEPA", "NEPA"):
+    # HuggingFace I-JEPA (no CLS token — all tokens are patches)
+    if name == "I-JEPA":
         output = model(pixel_values=img_t)
         return output.last_hidden_state[0].cpu()
+
+    # NEPA (has CLS token at position 0 — skip it)
+    if name == "NEPA":
+        output = model(pixel_values=img_t)
+        return output.last_hidden_state[0, 1:].cpu()
 
     # OpenCLIP CLIP
     if name == "CLIP":
@@ -117,8 +146,6 @@ def _extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> tor
         raise RuntimeError("Could not extract CLIP patch features")
 
     # timm-style ViT (DINOv2, SigLIP, ViT-sup, MAE-FT, etc.)
-    # Must come before DINO-v1 check: DINOv2 (timm) also has get_intermediate_layers
-    # but that method already strips the CLS token, causing off-by-one.
     if hasattr(model, "forward_features"):
         features = model.forward_features(img_t)
         if hasattr(model, "num_prefix_tokens"):
@@ -137,18 +164,20 @@ def _extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> tor
     raise RuntimeError(f"Patch feature extraction not supported for {encoder.name}")
 
 
-# --------------------------------------------------------------------------- #
-# Identify object patches in the encoder's patch grid
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
+# Ground-truth mask and patch indices
+# ---------------------------------------------------------------------------
 
-def _get_object_patch_indices(
+def get_foreground_mask(image: np.ndarray, threshold: int = 250) -> np.ndarray:
+    """Binary mask: 1 = foreground (non-white), 0 = background."""
+    bg = np.all(image >= threshold, axis=-1)  # [H, W]
+    return (~bg).astype(np.float32)
+
+
+def get_object_patch_indices(
     image: np.ndarray, gh: int, gw: int, threshold: int = 250,
 ) -> list[int]:
-    """Return flat indices of encoder patches that overlap with non-white pixels.
-
-    Maps the original image (H, W) onto the encoder's (gh, gw) patch grid.
-    A patch is an "object patch" if any pixel in its region is non-white.
-    """
+    """Return flat indices of encoder patches that overlap with non-white pixels."""
     H, W = image.shape[:2]
     patch_h = H / gh
     patch_w = W / gw
@@ -165,11 +194,11 @@ def _get_object_patch_indices(
     return object_indices
 
 
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 # Progressive masking at patch level + 2-means + IoU
-# --------------------------------------------------------------------------- #
+# ---------------------------------------------------------------------------
 
-def _progressive_segment_iou(
+def progressive_segment_iou(
     patch_feats: torch.Tensor,
     gh: int, gw: int,
     object_indices: list[int],
@@ -178,18 +207,12 @@ def _progressive_segment_iou(
 ) -> list[float]:
     """Run progressive masking on patch features and compute IoU at each level.
 
-    At each level L (1-8):
-      - Reveal P = 0.7^(8-L) fraction of object patches
-      - 2-means on revealed patches only
-      - Map labels back to full image, compute IoU
-
     Returns list of 8 IoU values.
     """
     H, W = gt_mask.shape
     N = gh * gw
     feats_np = patch_feats.float().numpy()
 
-    # Shuffle object indices with fixed seed
     rng = random.Random(seed)
     shuffled_obj = list(object_indices)
     rng.shuffle(shuffled_obj)
@@ -201,31 +224,23 @@ def _progressive_segment_iou(
         revealed = shuffled_obj[:num_reveal]
 
         if len(revealed) < 2:
-            # Not enough patches for 2-means
             ious.append(0.0)
             continue
 
-        # Extract features of revealed patches
         revealed_feats = feats_np[revealed]
-
-        # 2-means clustering on revealed patches
         kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-        revealed_labels = kmeans.fit_predict(revealed_feats)  # [num_reveal]
+        revealed_labels = kmeans.fit_predict(revealed_feats)
 
-        # Build full label grid: -1 = background (unrevealed/white)
         label_flat = np.full(N, -1, dtype=np.int32)
         for idx, lab in zip(revealed, revealed_labels):
             label_flat[idx] = lab
         label_grid = label_flat.reshape(gh, gw)
 
-        # Upsample to original resolution
-        # Use float for interpolation: -1 stays as bg
         label_img = np.array(
             Image.fromarray(label_grid.astype(np.int32).astype(np.int16))
                  .resize((W, H), Image.NEAREST)
         ).astype(np.int32)
 
-        # Try both cluster assignments for foreground
         iou_best = 0.0
         for fg_label in [0, 1]:
             pred_fg = (label_img == fg_label).astype(np.float32)
@@ -239,6 +254,33 @@ def _progressive_segment_iou(
     return ious
 
 
+# ---------------------------------------------------------------------------
+# JSON helpers
+# ---------------------------------------------------------------------------
+
+def fix_json_keys(d):
+    """Recursively convert string keys to int where possible (for JSON roundtrip)."""
+    if not isinstance(d, dict):
+        return d
+    try:
+        return {int(k): v for k, v in d.items()}
+    except (ValueError, TypeError):
+        return {k: fix_json_keys(v) for k, v in d.items()}
+
+
+def extract_val(v):
+    """Extract mean from a {mean, std} dict or return the value directly."""
+    return v["mean"] if isinstance(v, dict) and "mean" in v else v
+
+
+def extract_std(v):
+    """Extract std from a {mean, std} dict or return 0."""
+    return v["std"] if isinstance(v, dict) and "std" in v else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
 
 def _visibility_x() -> list[float]:
     """X-axis values: visibility ratio for each level."""
@@ -252,13 +294,7 @@ def plot_metric_vs_masking(
     save_path: Path,
     colors: dict[str, str] | None = None,
 ) -> None:
-    """Line plot with one line per encoder, x = visibility ratio.
-
-    Args:
-        results: {encoder_name: {level: float_or_dict}}
-                 Values can be plain floats or {"mean": ..., "std": ...}.
-        colors: optional {label: color_string} mapping.
-    """
+    """Line plot with one line per encoder, x = visibility ratio."""
     fig, ax = plt.subplots(figsize=(6, 4))
     x = np.array(_visibility_x())
     levels = get_mask_levels()
@@ -347,8 +383,12 @@ def plot_completion_summary(
     print(f"  Saved: {save_path}")
 
 
+# ---------------------------------------------------------------------------
+# I/O
+# ---------------------------------------------------------------------------
+
 def save_results(results: dict, path: Path) -> None:
-    """Save results dict as JSON."""
+    """Save results dict as JSON with type conversion."""
     def _convert(obj):
         if isinstance(obj, dict):
             return {str(k): _convert(v) for k, v in obj.items()}
