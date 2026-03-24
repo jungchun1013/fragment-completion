@@ -6,7 +6,7 @@ from PIL import Image
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
-from wrappers.encoder import BaseEncoder
+from models.encoder import BaseEncoder
 
 from .masking import get_mask_levels, get_visibility_ratio, mask_pil_image
 from .utils import extract_patch_features, get_encoder_geometry
@@ -74,6 +74,7 @@ def evaluate_gestalt(
     seed: int = 42,
     max_images: int | None = None,
     num_choices: int = 5,
+    num_runs: int = 3,
 ) -> dict:
     """Evaluate gestalt completion: mean IoU and silhouette score per masking level.
 
@@ -86,23 +87,23 @@ def evaluate_gestalt(
     img_size, patch_size = get_encoder_geometry(encoder)
 
     n = min(len(dataset), max_images) if max_images else len(dataset)
-    for i in range(n):
-        sample = dataset[i]
-        pil = sample["image_pil"]
-        seg_mask = sample["seg_mask"]
-        gt_fg = (seg_mask > 0).astype(np.float32)
+    for L in levels:
+        for run in range(num_runs):
+            seed_run = seed + run
+            for i in range(n):
+                sample = dataset[i]
+                pil = sample["image_pil"]
+                seg_mask = sample["seg_mask"]
+                gt_fg = (seg_mask > 0).astype(np.float32)
 
-        for L in levels:
-            masked = mask_pil_image(pil, L, seg_mask, seed=seed, idx=i,
-                                    patch_size=patch_size, target_size=img_size)
-            iou, sil = _segment_iou(encoder, masked, gt_fg)
-            ious[L].append(iou)
-            sils[L].append(sil)
+                masked = mask_pil_image(pil, L, seg_mask, seed=seed_run, idx=i,
+                                        patch_size=patch_size, target_size=img_size)
+                iou, sil = _segment_iou(encoder, masked, gt_fg)
+                ious[L].append(iou)
+                sils[L].append(sil)
 
-        if (i + 1) % 20 == 0 or i == 0 or i == n - 1:
-            latest = {L: np.mean(ious[L]) for L in levels if ious[L]}
-            vals = " ".join(f"L{L}:{latest[L]:.3f}" for L in levels if L in latest)
-            print(f"    gestalt [{i+1}/{n}] IoU: {vals}")
+        vals = f"L{L}: IoU={np.mean(ious[L]):.3f}±{np.std(ious[L]):.3f}"
+        print(f"    gestalt {vals} ({num_runs} runs)")
 
     return {
         L: {
@@ -222,7 +223,7 @@ def visualize_gestalt_single(
     fig.tight_layout()
 
     if save_path is None:
-        save_path = f"results/gestalt_vis_{image_idx}.png"
+        save_path = f"results/gestalt/gestalt_vis_{image_idx}.png"
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
