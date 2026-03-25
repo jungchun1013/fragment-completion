@@ -27,6 +27,7 @@ from src.config import (
     IMAGE_TYPES,
     IMAGE_TYPE_ALPHA,
     IMAGE_TYPE_COLORS,
+    PLOT_STYLE as PS,
     dir_to_display,
     display_to_dir,
     results_all_encoders,
@@ -38,6 +39,7 @@ from src.utils import (
     extract_val,
     extract_std,
     fix_json_keys,
+    make_fig,
     plot_metric_vs_masking,
     plot_completion_summary,
 )
@@ -70,9 +72,6 @@ def _load_legacy(results_dir: Path) -> dict:
     for img_type in IMAGE_TYPES:
         candidates = [
             results_dir / "image_types" / img_type / "results.json",
-            # Legacy paths
-            results_dir / f"fragment_v2_{img_type}_1" / "results.json",
-            results_dir / f"fragment_v2_{img_type}" / "results.json",
         ]
         path = None
         for c in candidates:
@@ -110,7 +109,7 @@ def _load_legacy(results_dir: Path) -> dict:
     encoders_dir = results_dir / "encoders"
     if encoders_dir.exists():
         for enc_dir in sorted(encoders_dir.iterdir()):
-            sim_path = enc_dir / "similarity_analysis.json"
+            sim_path = enc_dir / "mnemonic" / "similarity_analysis.json"
             if not sim_path.exists():
                 continue
             try:
@@ -160,29 +159,35 @@ def _plot_panel(ax, panel_data, title, ylabel):
         color = ENCODER_COLORS.get(enc, (0, 0, 0))
         alpha = IMAGE_TYPE_ALPHA.get(img_type, 1.0)
         x, y, std = _get_xy(values, levels)
-        ax.plot(x, y, marker="o", markersize=4, linewidth=1.5,
-                color=(*color[:3], alpha))
+        ax.plot(x, y, marker=PS["marker"], markersize=PS["markersize"],
+                linewidth=PS["linewidth"], color=(*color[:3], alpha))
         if np.any(std > 0):
-            ax.fill_between(x, y - std, y + std, color=(*color[:3], alpha * 0.2))
-    ax.set_xlabel("Visibility", fontsize=9)
-    ax.set_ylabel(ylabel, fontsize=9)
-    ax.set_title(title, fontsize=10, fontweight="bold")
+            ax.fill_between(x, y - std, y + std,
+                            color=(*color[:3], alpha * PS["std_alpha"]))
+    ax.set_xlabel("Visibility", fontsize=PS["label_fontsize"])
+    ax.set_ylabel(ylabel, fontsize=PS["label_fontsize"])
+    ax.set_title(title, fontsize=PS["subplot_title_fontsize"], fontweight="bold")
+    ax.set_ylim(-0.05, 1.05)
+    ax.tick_params(labelsize=PS["tick_labelsize"], width=PS["tick_width"])
+    for spine in ax.spines.values():
+        spine.set_linewidth(PS["tick_width"])
     ax.grid(True, alpha=0.3)
-    ax.tick_params(labelsize=8)
 
 
 def _make_legend_handles(encoders):
     enc_handles = [
         mlines.Line2D([], [], color=ENCODER_COLORS.get(e, "black"),
-                       marker="o", markersize=5, linewidth=2, label=e)
+                       marker=PS["marker"], markersize=PS["markersize"],
+                       linewidth=PS["linewidth"], label=e)
         for e in encoders
     ]
     type_handles = [
         mlines.Line2D([], [], color=(0.3, 0.3, 0.3, IMAGE_TYPE_ALPHA[t]),
-                       marker="o", markersize=5, linewidth=2, label=t)
+                       marker=PS["marker"], markersize=PS["markersize"],
+                       linewidth=PS["linewidth"], label=t)
         for t in IMAGE_TYPES
     ]
-    return enc_handles + [mlines.Line2D([], [], color="none", label="")] + type_handles
+    return enc_handles, type_handles
 
 
 # ---------------------------------------------------------------------------
@@ -221,36 +226,54 @@ def cmd_combined(data: dict, out_root: Path):
 
     # Combined 5-subplot figure
     n = len(panels)
-    fig, axes = plt.subplots(1, n, figsize=(4.2 * n, 4))
+    fig, axes = make_fig(1, n)
     if n == 1:
         axes = [axes]
     for ax, (title, ylabel, items) in zip(axes, panels):
         _plot_panel(ax, items, title, ylabel)
 
-    handles = _make_legend_handles(encoders)
-    fig.legend(handles=handles, loc="lower center",
-               ncol=len(encoders) + 1 + len(IMAGE_TYPES),
-               fontsize=8, frameon=True, bbox_to_anchor=(0.5, -0.02))
-    fig.suptitle("Fragment Completion — All Encoders", fontsize=13,
-                 fontweight="bold", y=1.02)
-    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    enc_handles, type_handles = _make_legend_handles(encoders)
+    # Row 1: encoders, Row 2: image types — two separate legends
+    leg1 = fig.legend(handles=enc_handles, loc="outside lower center",
+                      ncol=len(enc_handles), fontsize=PS["legend_fontsize"],
+                      bbox_to_anchor=(0.5, -0.1),
+                      frameon=False)
+    fig.legend(handles=type_handles, loc="outside lower center",
+               ncol=len(type_handles), fontsize=PS["legend_fontsize"],
+               bbox_to_anchor=(0.5, -0.16),
+               frameon=False)
+    fig.add_artist(leg1)
+    fig.suptitle("Fragment Completion — All Encoders",
+                 fontsize=PS["suptitle_fontsize"], fontweight="bold")
     save = all_dir / "completion_summary.png"
-    fig.savefig(save, dpi=150, bbox_inches="tight")
+    fig.savefig(save, dpi=PS["dpi"], bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {save}")
 
     # Individual plots
-    fname_map = ["gestalt_iou", "mnemonic_similarity", "mnemonic_retrieval",
-                 "semantic_prototype", "semantic_zeroshot"]
-    for (title, ylabel, items), fname in zip(panels, fname_map):
-        fig, ax = plt.subplots(figsize=(7, 5))
+    fpath_map = [
+        "gestalt/gestalt_iou",
+        "mnemonic/mnemonic_similarity",
+        "mnemonic/mnemonic_retrieval",
+        "semantic/semantic_prototype",
+        "semantic/semantic_zeroshot",
+    ]
+    for (title, ylabel, items), fpath in zip(panels, fpath_map):
+        fig, ax = make_fig(1, 1)
         _plot_panel(ax, items, title, ylabel)
-        ax.legend(handles=_make_legend_handles(encoders), loc="best",
-                  fontsize=7, ncol=2, framealpha=0.9)
-        fig.tight_layout()
-        sp = all_dir / f"{fname}.png"
+        enc_h, type_h = _make_legend_handles(encoders)
+        leg1 = fig.legend(handles=enc_h, loc="outside lower center",
+                          ncol=len(enc_h), fontsize=PS["legend_fontsize"],
+                          bbox_to_anchor=(0.5, -0.1),
+                          frameon=False)
+        fig.legend(handles=type_h, loc="outside lower center",
+                   ncol=len(type_h), fontsize=PS["legend_fontsize"],
+                   bbox_to_anchor=(0.5, -0.16),
+                   frameon=False)
+        fig.add_artist(leg1)
+        sp = all_dir / f"{fpath}.png"
         sp.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(sp, dpi=150, bbox_inches="tight")
+        fig.savefig(sp, dpi=PS["dpi"], bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved: {sp}")
 
@@ -273,7 +296,7 @@ def cmd_by_encoder(data: dict, out_root: Path):
                    for it in IMAGE_TYPES if it in enc_data and "gestalt_iou" in enc_data[it]}
         if gestalt:
             plot_metric_vs_masking(gestalt, "IoU", f"{enc} — Gestalt (IoU)",
-                                   enc_dir / "gestalt_iou.png", colors=IMAGE_TYPE_COLORS)
+                                   enc_dir / "gestalt" / "gestalt_iou.png", colors=IMAGE_TYPE_COLORS)
 
         # Mnemonic
         mnem_sim = {it: enc_data[it]["mnemonic_similarity"]
@@ -283,11 +306,11 @@ def cmd_by_encoder(data: dict, out_root: Path):
         if mnem_sim:
             plot_metric_vs_masking(mnem_sim, "Cosine Similarity",
                                    f"{enc} — Mnemonic (Similarity)",
-                                   enc_dir / "mnemonic_similarity.png", colors=IMAGE_TYPE_COLORS)
+                                   enc_dir / "mnemonic" / "mnemonic_similarity.png", colors=IMAGE_TYPE_COLORS)
         if mnem_ret:
             plot_metric_vs_masking(mnem_ret, "Top-1 Accuracy",
                                    f"{enc} — Mnemonic (Retrieval)",
-                                   enc_dir / "mnemonic_retrieval.png", colors=IMAGE_TYPE_COLORS)
+                                   enc_dir / "mnemonic" / "mnemonic_retrieval.png", colors=IMAGE_TYPE_COLORS)
 
         # Semantic
         sem_proto = {it: enc_data[it]["semantic_prototype"]
@@ -297,11 +320,11 @@ def cmd_by_encoder(data: dict, out_root: Path):
         if sem_proto:
             plot_metric_vs_masking(sem_proto, "Accuracy",
                                    f"{enc} — Semantic (Prototype)",
-                                   enc_dir / "semantic_prototype.png", colors=IMAGE_TYPE_COLORS)
+                                   enc_dir / "semantic" / "semantic_prototype.png", colors=IMAGE_TYPE_COLORS)
         if sem_zs:
             plot_metric_vs_masking(sem_zs, "Accuracy",
                                    f"{enc} — Semantic (Zero-shot)",
-                                   enc_dir / "semantic_zeroshot.png", colors=IMAGE_TYPE_COLORS)
+                                   enc_dir / "semantic" / "semantic_zeroshot.png", colors=IMAGE_TYPE_COLORS)
 
         # Summary
         # Reconstruct mnemonic/semantic dicts expected by plot_completion_summary
@@ -329,6 +352,98 @@ def cmd_by_encoder(data: dict, out_root: Path):
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: by-image-type
+# ---------------------------------------------------------------------------
+
+def cmd_by_image_type(data: dict, out_root: Path):
+    """Per-image-type plots: lines = encoders."""
+    # Pivot: data is {encoder: {img_type: {metric: ...}}}
+    # We need {img_type: {encoder: {metric: ...}}}
+    by_type: dict[str, dict[str, dict]] = {}
+    for enc, enc_data in data.items():
+        for img_type, metrics in enc_data.items():
+            by_type.setdefault(img_type, {})[enc] = metrics
+
+    for img_type in IMAGE_TYPES:
+        if img_type not in by_type:
+            continue
+        type_data = by_type[img_type]  # {encoder: {metric: {level: val}}}
+        out_dir = results_for_image_type(img_type, root=out_root)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n  === {img_type} -> {out_dir} ===")
+
+        # Gestalt
+        gestalt = {enc: type_data[enc]["gestalt_iou"]
+                   for enc in type_data if "gestalt_iou" in type_data[enc]}
+        if gestalt:
+            plot_metric_vs_masking(gestalt, "IoU", f"{img_type} — Gestalt (IoU)",
+                                   out_dir / "gestalt" / "gestalt_iou.png")
+            sil_data = {}
+            for enc, vals in gestalt.items():
+                first = next(iter(vals.values()))
+                if isinstance(first, dict) and "silhouette_mean" in first:
+                    sil_data[enc] = {
+                        L: {"mean": v["silhouette_mean"], "std": v["silhouette_std"]}
+                        for L, v in vals.items()
+                    }
+            if sil_data:
+                plot_metric_vs_masking(sil_data, "Silhouette Score",
+                                       f"{img_type} — Gestalt (Cluster Separation)",
+                                       out_dir / "gestalt" / "gestalt_silhouette.png")
+
+        # Mnemonic
+        mnem_sim = {enc: type_data[enc]["mnemonic_similarity"]
+                    for enc in type_data if "mnemonic_similarity" in type_data[enc]}
+        mnem_ret = {enc: type_data[enc]["mnemonic_retrieval"]
+                    for enc in type_data if "mnemonic_retrieval" in type_data[enc]}
+        if mnem_sim:
+            plot_metric_vs_masking(mnem_sim, "Cosine Similarity",
+                                   f"{img_type} — Mnemonic (Similarity)",
+                                   out_dir / "mnemonic" / "mnemonic_similarity.png")
+        if mnem_ret:
+            plot_metric_vs_masking(mnem_ret, "Top-1 Accuracy",
+                                   f"{img_type} — Mnemonic (Retrieval)",
+                                   out_dir / "mnemonic" / "mnemonic_retrieval.png")
+
+        # Semantic
+        sem_proto = {enc: type_data[enc]["semantic_prototype"]
+                     for enc in type_data if "semantic_prototype" in type_data[enc]}
+        sem_zs = {enc: type_data[enc]["semantic_zeroshot"]
+                  for enc in type_data if "semantic_zeroshot" in type_data[enc]}
+        if sem_proto:
+            plot_metric_vs_masking(sem_proto, "Accuracy",
+                                   f"{img_type} — Semantic (Prototype)",
+                                   out_dir / "semantic" / "semantic_prototype.png")
+        if sem_zs:
+            plot_metric_vs_masking(sem_zs, "Accuracy",
+                                   f"{img_type} — Semantic (Zero-shot)",
+                                   out_dir / "semantic" / "semantic_zeroshot.png")
+
+        # Summary
+        mnem_combined = {}
+        sem_combined = {}
+        for enc in type_data:
+            m = type_data[enc]
+            if "mnemonic_similarity" in m:
+                mnem_combined[enc] = {
+                    "similarity": m["mnemonic_similarity"],
+                    "retrieval": m.get("mnemonic_retrieval", {}),
+                }
+            sem_entry = {}
+            if "semantic_prototype" in m:
+                sem_entry["prototype_acc"] = m["semantic_prototype"]
+            if "semantic_zeroshot" in m:
+                sem_entry["zeroshot_acc"] = m["semantic_zeroshot"]
+            if sem_entry:
+                sem_combined[enc] = sem_entry
+
+        plot_completion_summary(
+            gestalt or None, mnem_combined or None, sem_combined or None,
+            out_dir / "completion_summary.png",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: similarity-diff
 # ---------------------------------------------------------------------------
 
@@ -337,7 +452,7 @@ def cmd_similarity_diff(data: dict, out_root: Path):
     levels = get_mask_levels()
 
     for img_type in IMAGE_TYPES:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
+        fig, (ax1, ax2) = make_fig(1, 2, sharey=False)
 
         for enc in sorted(data.keys()):
             if img_type not in data[enc]:
@@ -363,11 +478,11 @@ def cmd_similarity_diff(data: dict, out_root: Path):
                 mn_diff_std = [np.sqrt(s1**2 + s2**2) for s1, s2 in zip(mn_t_std, mn_a_std)]
 
                 ax1.plot(levels, mn_diff, "o-", label=enc, color=color,
-                         linewidth=2, markersize=5)
+                         linewidth=PS["linewidth"], markersize=PS["markersize"])
                 ax1.fill_between(levels,
                                  [m - s for m, s in zip(mn_diff, mn_diff_std)],
                                  [m + s for m, s in zip(mn_diff, mn_diff_std)],
-                                 alpha=0.12, color=color)
+                                 alpha=PS["std_alpha"], color=color)
 
             if has_sem:
                 sem_same = [extract_val(d["similarity_semantic_same_cat"][L]) for L in levels]
@@ -378,42 +493,44 @@ def cmd_similarity_diff(data: dict, out_root: Path):
                 sem_diff_std = [np.sqrt(s1**2 + s2**2) for s1, s2 in zip(sem_s_std, sem_a_std)]
 
                 ax2.plot(levels, sem_diff, "o-", label=enc, color=color,
-                         linewidth=2, markersize=5)
+                         linewidth=PS["linewidth"], markersize=PS["markersize"])
                 ax2.fill_between(levels,
                                  [m - s for m, s in zip(sem_diff, sem_diff_std)],
                                  [m + s for m, s in zip(sem_diff, sem_diff_std)],
-                                 alpha=0.12, color=color)
+                                 alpha=PS["std_alpha"], color=color)
 
         xtick_labels = [f"L{L}\n({get_visibility_ratio(L):.0%})" for L in levels]
         for ax, title in [(ax1, "Mnemonic (target - all)"),
                           (ax2, "Semantic (same_cat - all_cat)")]:
-            ax.set_xlabel("Fragmentation Level", fontsize=12)
-            ax.set_ylabel("Similarity Difference", fontsize=12)
-            ax.set_title(title, fontsize=13, fontweight="bold")
+            ax.set_xlabel("Fragmentation Level", fontsize=PS["label_fontsize"])
+            ax.set_ylabel("Similarity Difference", fontsize=PS["label_fontsize"])
+            ax.set_title(title, fontsize=PS["subplot_title_fontsize"], fontweight="bold")
             ax.set_xticks(levels)
-            ax.set_xticklabels(xtick_labels, fontsize=8)
-            ax.legend(fontsize=9)
+            ax.set_xticklabels(xtick_labels, fontsize=PS["tick_labelsize"])
+            ax.tick_params(width=PS["tick_width"])
+            for spine in ax.spines.values():
+                spine.set_linewidth(PS["tick_width"])
             ax.grid(True, alpha=0.3)
             ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
 
-        fig.suptitle(f"Similarity Difference — {img_type}", fontsize=15, fontweight="bold")
-        fig.tight_layout()
+        # One shared legend below both subplots
+        handles, labels = ax1.get_legend_handles_labels()
+        if not handles:
+            handles, labels = ax2.get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="outside lower center",
+                       ncol=len(labels), fontsize=PS["legend_fontsize"],
+                       frameon=True)
+        fig.suptitle(f"Similarity Difference — {img_type}",
+                     fontsize=PS["suptitle_fontsize"], fontweight="bold")
 
         # Save into all_encoders/ directory alongside other combined plots
         save_dir = results_all_encoders(root=out_root)
         save_dir.mkdir(parents=True, exist_ok=True)
         save_path = save_dir / f"similarity_diff_{img_type}.png"
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        fig.savefig(save_path, dpi=PS["dpi"], bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved: {save_path}")
-
-        # Also save per-encoder similarity diff
-        for enc in sorted(data.keys()):
-            if img_type not in data[enc]:
-                continue
-            enc_dir = results_for_encoder(enc, root=out_root)
-            enc_dir.mkdir(parents=True, exist_ok=True)
-            # Individual encoder similarity diff is handled by by-encoder
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +542,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     # Common args
-    for name in ("combined", "by-encoder", "similarity-diff", "all"):
+    for name in ("combined", "by-encoder", "by-image-type", "similarity-diff", "all"):
         p = sub.add_parser(name)
         p.add_argument("--results", type=str, default="results/results.json",
                         help="Path to results.json or results directory")
@@ -447,6 +564,9 @@ def main():
     if cmd in ("by-encoder", "all"):
         print("\n--- Per-encoder plots ---")
         cmd_by_encoder(data, out_root)
+    if cmd in ("by-image-type", "all"):
+        print("\n--- Per-image-type plots ---")
+        cmd_by_image_type(data, out_root)
     if cmd in ("similarity-diff", "all"):
         print("\n--- Similarity diff plots ---")
         cmd_similarity_diff(data, out_root)

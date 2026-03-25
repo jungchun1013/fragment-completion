@@ -32,7 +32,7 @@ ENCODER_META: dict[str, EncoderMeta] = {
 }
 
 # Canonical plot ordering (subset used in most experiments)
-ENCODER_DISPLAY_ORDER = ["CLIP", "DINO-v1", "DINOv2", "MAE", "I-JEPA", "ViT-supervised"]
+ENCODER_DISPLAY_ORDER = ["CLIP", "DINO-v1", "DINOv2", "MAE", "I-JEPA", "ViT-supervised", "NEPA"]
 
 # ---------------------------------------------------------------------------
 # Reverse lookups
@@ -92,6 +92,25 @@ IMAGE_TYPE_ALPHA = {
 
 _TAB10 = plt.cm.tab10.colors
 ENCODER_COLORS = {enc: _TAB10[i] for i, enc in enumerate(ENCODER_DISPLAY_ORDER)}
+
+# ---------------------------------------------------------------------------
+# Plot style
+# ---------------------------------------------------------------------------
+
+PLOT_STYLE = {
+    "linewidth": 2,
+    "std_alpha": 0.2,
+    "tick_width": 2,
+    "tick_labelsize": 14,
+    "label_fontsize": 16,
+    "legend_fontsize": 14,
+    "subplot_title_fontsize": 18,
+    "suptitle_fontsize": 20,
+    "marker": "o",
+    "markersize": 6,
+    "dpi": 150,
+    "subplot_size": (6.4, 4.8),  # (w, h) desired axes area per subplot
+}
 
 # ---------------------------------------------------------------------------
 # Result paths

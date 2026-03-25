@@ -51,7 +51,7 @@ def _run_plots_and_save(all_gestalt, all_mnemonic, all_semantic, out_dir):
         plot_metric_vs_masking(
             all_gestalt, "IoU",
             "Gestalt Completion (Segmentation IoU)",
-            out_dir / "gestalt_iou.png",
+            out_dir / "gestalt" / "gestalt_iou.png",
         )
         sil_data = {}
         for enc, vals in all_gestalt.items():
@@ -62,7 +62,7 @@ def _run_plots_and_save(all_gestalt, all_mnemonic, all_semantic, out_dir):
         plot_metric_vs_masking(
             sil_data, "Silhouette Score",
             "Gestalt Completion (Cluster Separation)",
-            out_dir / "gestalt_silhouette.png",
+            out_dir / "gestalt" / "gestalt_silhouette.png",
         )
 
     if all_mnemonic:
@@ -71,12 +71,12 @@ def _run_plots_and_save(all_gestalt, all_mnemonic, all_semantic, out_dir):
         plot_metric_vs_masking(
             sim_data, "Cosine Similarity",
             "Mnemonic Completion (Embedding Similarity)",
-            out_dir / "mnemonic_similarity.png",
+            out_dir / "mnemonic" / "mnemonic_similarity.png",
         )
         plot_metric_vs_masking(
             ret_data, "Top-1 Accuracy",
             "Mnemonic Completion (Retrieval Accuracy)",
-            out_dir / "mnemonic_retrieval.png",
+            out_dir / "mnemonic" / "mnemonic_retrieval.png",
         )
 
     if all_semantic:
@@ -84,7 +84,7 @@ def _run_plots_and_save(all_gestalt, all_mnemonic, all_semantic, out_dir):
         plot_metric_vs_masking(
             proto_data, "Accuracy",
             "Semantic Completion (Prototype Classification)",
-            out_dir / "semantic_prototype.png",
+            out_dir / "semantic" / "semantic_prototype.png",
         )
         zs_data = {
             k: v["zeroshot_acc"]
@@ -95,7 +95,7 @@ def _run_plots_and_save(all_gestalt, all_mnemonic, all_semantic, out_dir):
             plot_metric_vs_masking(
                 zs_data, "Accuracy",
                 "Semantic Completion (CLIP Zero-shot)",
-                out_dir / "semantic_zeroshot.png",
+                out_dir / "semantic" / "semantic_zeroshot.png",
             )
 
     plot_completion_summary(
@@ -137,6 +137,25 @@ def _run_plots_and_save(all_gestalt, all_mnemonic, all_semantic, out_dir):
         for enc, vals in all_semantic.items():
             row = "  ".join(f"{extract_val(vals['prototype_acc'][L]):.4f}       " for L in levels)
             print(f"    {enc:<12}  {row}")
+
+
+def _merge_and_save(unified: dict, results_path: Path) -> None:
+    """Merge unified results into existing results.json (incremental save)."""
+    if results_path.exists():
+        with open(results_path) as f:
+            existing = json.load(f).get("encoders", {})
+    else:
+        existing = {}
+    for enc, data in unified.items():
+        if enc not in existing:
+            existing[enc] = data
+        else:
+            for img_type, metrics in data.items():
+                if img_type not in existing[enc]:
+                    existing[enc][img_type] = metrics
+                else:
+                    existing[enc][img_type].update(metrics)
+    save_results({"encoders": existing}, results_path)
 
 
 def main():
@@ -268,11 +287,12 @@ def main():
                 print(f"  similarity done in {time.time()-t4:.1f}s\n")
 
         print(f"  Total for {display}: {time.time()-t0:.1f}s")
+
+        # Save results.json immediately after each encoder
+        _merge_and_save(unified, out_root / "results.json")
+
         del encoder
         torch.cuda.empty_cache()
-
-    # Save unified results.json
-    save_results({"encoders": unified}, out_root / "results.json")
 
     # Per image-type plots
     for img_type in image_types:
@@ -320,7 +340,8 @@ def main():
                 continue
             enc_dir = results_for_encoder(enc_display, root=out_root)
             enc_dir.mkdir(parents=True, exist_ok=True)
-            sim_path = enc_dir / "similarity_analysis.json"
+            sim_path = enc_dir / "mnemonic" / "similarity_analysis.json"
+            sim_path.parent.mkdir(parents=True, exist_ok=True)
             with open(sim_path, "w") as f:
                 json.dump(results_by_img, f, indent=2, default=str)
             print(f"  Saved: {sim_path}")

@@ -10,17 +10,30 @@ Python 3.x, PyTorch, NumPy, Hydra, uv, Slurm
 ## Key Paths
   fragment-completion/          
   ├── run.py              # main entry point
+  ├── data/               # dataset
   ├── configs/            # Hydra configs (don't modify without permission)
-  ├── experiments/        # unit experiments and utils
-  ├── models/             # models (ignore other subfolders)
+  ├── src/                # unit experiments and utils
+  ├── models/             # models (ignore other subfolders)              
+  │   ├── __init__.py     # re-exports
+  │   ├── encoder.py       # BaseEncoder ABC                         
+  │   ├── processor.py     # ImageProcessor, to_transform
+  │   ├── registry.py       # get_encoder(), register()
+  │   └── encoders/         # all encoder implementations          
+  │       ├── clip.py                                              
+  │       ├── dino.py                                                                 
+  │       ├── dinov2.py  
+  │       └── ...
   ├── scripts/            # scripts for running experiments and testing
   ├── results/            # output results
   │   ├── results.json        # aggregated metrics
-  │   ├── all_encoders/       # multi-encoder comparisons
-  │   ├── encoders/           # per-encoder results (clip, dino_v1, dinov2, mae, ...)
-  │   ├── image_types/        # by variant (original, gray, lined)
-  │   ├── visualization/      # generated plots
-  │   └── deprecated/         # legacy experiment runs
+  │   ├── completion_summary.png
+  │   ├── gestalt/            # gestalt_iou, gestalt_silhouette, gestalt_vis_{img_id}
+  │   ├── mnemonic/           # mnemonic_similarity, mnemonic_retrieval, similarity_analysis
+  │   ├── semantic/           # semantic_prototype, semantic_zeroshot (CLIP)
+  │   ├── all_encoders/       # multi-encoder comparisons (same subdir layout)
+  │   ├── encoders/           # per-encoder results (same subdir layout)
+  │   ├── image_types/        # by variant (same subdir layout)
+  │   └── _deprecated/        # legacy experiment runs
   └── analysis/           # plotting, analysis, visualization
 
 ## Datasets

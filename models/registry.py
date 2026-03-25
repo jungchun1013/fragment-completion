@@ -1,8 +1,8 @@
-from wrappers.encoder import BaseEncoder
+from models.encoder import BaseEncoder
 
 _REGISTRY: dict[str, type[BaseEncoder]] = {}
 
-# Mapping from encoder name → module name (under models/)
+# Mapping from encoder name → module name (under models/encoders/)
 _LAZY_MODULES: dict[str, str] = {
     "clip": "clip",
     "dino": "dino",
@@ -35,7 +35,7 @@ def _ensure_loaded(name: str) -> None:
     if name not in _LAZY_MODULES:
         return
     import importlib
-    importlib.import_module(f"models.{_LAZY_MODULES[name]}")
+    importlib.import_module(f"models.encoders.{_LAZY_MODULES[name]}")
 
 
 def get_encoder(name: str, **kwargs) -> BaseEncoder:

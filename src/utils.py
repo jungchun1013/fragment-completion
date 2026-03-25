@@ -18,8 +18,15 @@ import torch
 from PIL import Image
 from sklearn.cluster import KMeans
 
-from wrappers.encoder import BaseEncoder
+from models.encoder import BaseEncoder
 
+from .config import (
+    PLOT_STYLE as PS,
+    ENCODER_COLORS,
+    ENCODER_DISPLAY_ORDER,
+    IMAGE_TYPES,
+    IMAGE_TYPE_ALPHA,
+)
 from .masking import get_mask_levels, get_visibility_ratio
 
 # ---------------------------------------------------------------------------
@@ -102,7 +109,7 @@ def extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> torc
     """
     enc_name = encoder.name
     if enc_name not in _transform_cache:
-        from wrappers.processor import to_transform
+        from models.processor import to_transform
         _transform_cache[enc_name] = to_transform(encoder.processor)
     transform = _transform_cache[enc_name]
     img_t = transform(image_pil).unsqueeze(0).to(encoder.device)
@@ -282,9 +289,73 @@ def extract_std(v):
 # Plotting
 # ---------------------------------------------------------------------------
 
+def make_fig(
+    nrows: int = 1,
+    ncols: int = 1,
+    **subplot_kw,
+) -> tuple:
+    """Create figure + axes where each axes area is PS['subplot_size'] inches.
+
+    Uses a two-pass approach: create a throwaway figure with constrained_layout,
+    measure the actual axes size, then rescale the figure so each axes hits the
+    target size exactly.
+    """
+    sw, sh = PS["subplot_size"]
+    # Initial guess — generous so constrained_layout has room
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(sw * ncols + (ncols - 1) * 0.2 + 1,
+                 sh * nrows + (nrows - 1) * 0.2 + 2),
+        constrained_layout=True,
+        **subplot_kw,
+    )
+    # Force layout computation
+    fig.canvas.draw()
+    # Measure first axes
+    ax0 = axes.flat[0] if hasattr(axes, "flat") else axes
+    pos = ax0.get_position()
+    actual_w = pos.width * fig.get_figwidth()
+    actual_h = pos.height * fig.get_figheight()
+    # Scale figure so axes hit target size
+    fig.set_size_inches(
+        fig.get_figwidth() * (sw / actual_w),
+        fig.get_figheight() * (sh / actual_h),
+    )
+    return fig, axes
+
+
 def _visibility_x() -> list[float]:
     """X-axis values: visibility ratio for each level."""
     return [get_visibility_ratio(L) for L in get_mask_levels()]
+
+
+def _apply_style(ax, title: str, ylabel: str) -> None:
+    """Apply unified plot style to an axis."""
+    ax.set_xlabel("Visibility", fontsize=PS["label_fontsize"])
+    ax.set_ylabel(ylabel, fontsize=PS["label_fontsize"])
+    ax.set_title(title, fontsize=PS["subplot_title_fontsize"], fontweight="bold")
+    ax.set_ylim(-0.05, 1.05)
+    ax.tick_params(labelsize=PS["tick_labelsize"], width=PS["tick_width"])
+    for spine in ax.spines.values():
+        spine.set_linewidth(PS["tick_width"])
+    ax.grid(True, alpha=0.3)
+
+
+def _plot_line(ax, x, values, levels, enc_name, color=None):
+    """Plot a single encoder line with optional std band."""
+    v0 = values[levels[0]]
+    has_std = isinstance(v0, dict) and "std" in v0
+    if has_std:
+        y = np.array([values[L]["mean"] for L in levels])
+        std = np.array([values[L]["std"] for L in levels])
+        line, = ax.plot(x, y, marker=PS["marker"], markersize=PS["markersize"],
+                        linewidth=PS["linewidth"], label=enc_name, color=color)
+        ax.fill_between(x, y - std, y + std, alpha=PS["std_alpha"],
+                        color=line.get_color())
+    else:
+        y = [values[L] for L in levels]
+        ax.plot(x, y, marker=PS["marker"], markersize=PS["markersize"],
+                linewidth=PS["linewidth"], label=enc_name, color=color)
 
 
 def plot_metric_vs_masking(
@@ -295,31 +366,20 @@ def plot_metric_vs_masking(
     colors: dict[str, str] | None = None,
 ) -> None:
     """Line plot with one line per encoder, x = visibility ratio."""
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = make_fig(1, 1)
     x = np.array(_visibility_x())
     levels = get_mask_levels()
 
     for enc_name, values in results.items():
         c = colors.get(enc_name) if colors else None
-        v0 = values[levels[0]]
-        has_std = isinstance(v0, dict) and "std" in v0
-        if has_std:
-            y = np.array([values[L]["mean"] for L in levels])
-            std = np.array([values[L]["std"] for L in levels])
-            line, = ax.plot(x, y, marker="o", label=enc_name, color=c)
-            ax.fill_between(x, y - std, y + std, alpha=0.15, color=line.get_color())
-        else:
-            y = [values[L] for L in levels]
-            ax.plot(x, y, marker="o", label=enc_name, color=c)
+        _plot_line(ax, x, values, levels, enc_name, color=c)
 
-    ax.set_xlabel("Visibility (fraction of FG patches shown)")
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
+    _apply_style(ax, title, ylabel)
+    fig.legend(*ax.get_legend_handles_labels(),
+               loc="outside lower center", ncol=len(results),
+               fontsize=PS["legend_fontsize"], frameon=True)
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=150)
+    fig.savefig(save_path, dpi=PS["dpi"], bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {save_path}")
 
@@ -331,7 +391,7 @@ def plot_completion_summary(
     save_path: Path,
     colors: dict[str, str] | None = None,
 ) -> None:
-    """1xN subplot summary figure."""
+    """1xN subplot summary figure with one shared legend below."""
     panels = []
     if gestalt:
         panels.append(("Gestalt (IoU)", gestalt, "IoU"))
@@ -351,7 +411,7 @@ def plot_completion_summary(
         return
 
     n_panels = len(panels)
-    fig, axes = plt.subplots(1, n_panels, figsize=(5 * n_panels, 4))
+    fig, axes = make_fig(1, n_panels)
     if n_panels == 1:
         axes = [axes]
 
@@ -360,27 +420,137 @@ def plot_completion_summary(
     for ax, (title, data, ylabel) in zip(axes, panels):
         for enc_name, values in data.items():
             c = colors.get(enc_name) if colors else None
+            _plot_line(ax, x, values, levels, enc_name, color=c)
+        _apply_style(ax, title, ylabel)
+
+    # One shared legend below all subplots
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="outside lower center",
+               ncol=len(labels), fontsize=PS["legend_fontsize"],
+               frameon=True)
+    fig.suptitle("Fragment Completion Summary", fontsize=PS["suptitle_fontsize"],
+                 fontweight="bold")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=PS["dpi"], bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
+def plot_all_encoders_summary(
+    data: dict[str, dict[str, dict]],
+    save_dir: Path,
+) -> None:
+    """Combined all-encoders plot: color=encoder, alpha=image_type.
+
+    Args:
+        data: {encoder_display: {img_type: {metric: {level: {mean, std}}}}}
+        save_dir: directory to save plots into
+    """
+    import matplotlib.lines as mlines
+
+    levels = get_mask_levels()
+    x = np.array(_visibility_x())
+
+    encoders = [e for e in ENCODER_DISPLAY_ORDER if e in data]
+    if not encoders:
+        encoders = sorted(data.keys())
+
+    # Build panel items: list of (enc, img_type, values)
+    def _items(metric):
+        items = []
+        for enc in encoders:
+            for img_type in IMAGE_TYPES:
+                if img_type in data.get(enc, {}) and metric in data[enc][img_type]:
+                    items.append((enc, img_type, data[enc][img_type][metric]))
+        return items
+
+    panels = [
+        ("Gestalt (IoU)",          "IoU",        _items("gestalt_iou")),
+        ("Mnemonic (Similarity)",  "Cosine Sim", _items("mnemonic_similarity")),
+        ("Mnemonic (Retrieval@1)", "Accuracy",   _items("mnemonic_retrieval")),
+        ("Semantic (Prototype)",   "Accuracy",   _items("semantic_prototype")),
+    ]
+    zs = _items("semantic_zeroshot")
+    if zs:
+        panels.append(("Semantic (Zero-shot)", "Accuracy", zs))
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    def _plot_panel(ax, items, title, ylabel):
+        for enc, img_type, values in items:
+            color = ENCODER_COLORS.get(enc, (0, 0, 0))
+            alpha = IMAGE_TYPE_ALPHA.get(img_type, 1.0)
             v0 = values[levels[0]]
             has_std = isinstance(v0, dict) and "std" in v0
             if has_std:
                 y = np.array([values[L]["mean"] for L in levels])
                 std = np.array([values[L]["std"] for L in levels])
-                line, = ax.plot(x, y, marker="o", label=enc_name, color=c)
-                ax.fill_between(x, y - std, y + std, alpha=0.15, color=line.get_color())
+                ax.plot(x, y, marker=PS["marker"], markersize=PS["markersize"],
+                        linewidth=PS["linewidth"], color=(*color[:3], alpha))
+                ax.fill_between(x, y - std, y + std,
+                                color=(*color[:3], alpha * PS["std_alpha"]))
             else:
                 y = [values[L] for L in levels]
-                ax.plot(x, y, marker="o", label=enc_name, color=c)
-        ax.set_xlabel("Visibility")
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
+                ax.plot(x, y, marker=PS["marker"], markersize=PS["markersize"],
+                        linewidth=PS["linewidth"], color=(*color[:3], alpha))
+        _apply_style(ax, title, ylabel)
 
-    fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, dpi=150)
+    def _make_legend():
+        enc_handles = [
+            mlines.Line2D([], [], color=ENCODER_COLORS.get(e, "black"),
+                           marker=PS["marker"], markersize=PS["markersize"],
+                           linewidth=PS["linewidth"], label=e)
+            for e in encoders
+        ]
+        type_handles = [
+            mlines.Line2D([], [], color=(0.3, 0.3, 0.3, IMAGE_TYPE_ALPHA[t]),
+                           marker=PS["marker"], markersize=PS["markersize"],
+                           linewidth=PS["linewidth"], label=t)
+            for t in IMAGE_TYPES
+        ]
+        return enc_handles, type_handles
+
+    # --- Combined N-subplot figure ---
+    n = len(panels)
+    fig, axes = make_fig(1, n)
+    if n == 1:
+        axes = [axes]
+    for ax, (title, ylabel, items) in zip(axes, panels):
+        _plot_panel(ax, items, title, ylabel)
+
+    enc_h, type_h = _make_legend()
+    leg1 = fig.legend(handles=enc_h, loc="outside lower center",
+                      ncol=len(enc_h), fontsize=PS["legend_fontsize"],
+                      frameon=False)
+    fig.legend(handles=type_h, loc="outside lower center",
+               ncol=len(type_h), fontsize=PS["legend_fontsize"],
+               frameon=False)
+    fig.add_artist(leg1)
+    fig.suptitle("Fragment Completion — All Encoders",
+                 fontsize=PS["suptitle_fontsize"], fontweight="bold")
+    save = save_dir / "completion_summary.png"
+    fig.savefig(save, dpi=PS["dpi"], bbox_inches="tight")
     plt.close(fig)
-    print(f"  Saved: {save_path}")
+    print(f"  Saved: {save}")
+
+    # --- Individual metric plots ---
+    fname_map = ["gestalt_iou", "mnemonic_similarity", "mnemonic_retrieval",
+                 "semantic_prototype", "semantic_zeroshot"]
+    for (title, ylabel, items), fname in zip(panels, fname_map):
+        fig, ax = make_fig(1, 1)
+        _plot_panel(ax, items, title, ylabel)
+        enc_h, type_h = _make_legend()
+        leg1 = fig.legend(handles=enc_h, loc="outside lower center",
+                          ncol=len(enc_h), fontsize=PS["legend_fontsize"],
+                          frameon=False)
+        fig.legend(handles=type_h, loc="outside lower center",
+                   ncol=len(type_h), fontsize=PS["legend_fontsize"],
+                   frameon=False)
+        fig.add_artist(leg1)
+        sp = save_dir / f"{fname}.png"
+        fig.savefig(sp, dpi=PS["dpi"], bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {sp}")
 
 
 # ---------------------------------------------------------------------------

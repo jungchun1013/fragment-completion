@@ -176,7 +176,7 @@ def visualize_gestalt(encoder_names, dataset, image_idx, out_dir,
     fig.suptitle(f"Gestalt Segmentation — Image {image_id}", fontsize=11, fontweight="bold")
     fig.tight_layout()
 
-    save_path = out_dir / f"gestalt_vis_{image_id}.png"
+    save_path = out_dir / "gestalt" / f"gestalt_vis_{image_id}.png"
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -190,7 +190,7 @@ def visualize_gestalt(encoder_names, dataset, image_idx, out_dir,
 @torch.no_grad()
 def _collect_embeddings(encoder, dataset, image_idx, seed=42):
     """Collect complete embeddings for all images + masked embeddings for one image."""
-    from wrappers.processor import to_transform
+    from models.processor import to_transform
     transform = to_transform(encoder.processor)
     levels = get_mask_levels()
     n = len(dataset)

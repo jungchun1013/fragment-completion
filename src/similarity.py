@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from wrappers.encoder import BaseEncoder
+from models.encoder import BaseEncoder
 
 from .masking import get_mask_levels, get_visibility_ratio, mask_pil_image
 from .utils import embed_pil
@@ -23,7 +23,7 @@ def compute_similarity_analysis(encoder: BaseEncoder, dataset, seed: int = 42,
     Returns dict with keys: mnemonic_target, mnemonic_all,
     semantic_same_cat, semantic_all_cat. Each maps level -> {mean, std}.
     """
-    from wrappers.processor import to_transform
+    from models.processor import to_transform
     transform = to_transform(encoder.processor)
     levels = get_mask_levels()
     n = min(len(dataset), max_images) if max_images else len(dataset)

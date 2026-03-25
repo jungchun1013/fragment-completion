@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 import open_clip
 
-from wrappers.encoder import BaseEncoder
+from models.encoder import BaseEncoder
 
 from .masking import get_mask_levels, get_visibility_ratio, mask_pil_image
 from .utils import embed_pil
@@ -43,7 +43,7 @@ def evaluate_semantic(
             "zeroshot_acc":  {level: accuracy},  # only if CLIP
         }
     """
-    from wrappers.processor import to_transform
+    from models.processor import to_transform
     transform = to_transform(encoder.processor)
     levels = get_mask_levels()
     n = min(len(dataset), max_images) if max_images else len(dataset)
@@ -84,18 +84,20 @@ def evaluate_semantic(
     proto_acc = {}
     for L in levels:
         # Pre-embed masked images once (deterministic)
-        masked_embeds = []
-        for i in range(n):
-            sample = dataset[i]
-            masked = mask_pil_image(
-                sample["image_pil"], L, sample["seg_mask"], seed=seed, idx=i
-            )
-            embed = embed_pil(encoder, masked, transform)
-            masked_embeds.append(F.normalize(embed.unsqueeze(0), dim=-1))
-
-        run_accs = []
         for run in range(num_runs):
-            rng = np.random.RandomState(seed + run)
+            seed_run = seed + run
+            rng = np.random.RandomState(seed_run)
+            masked_embeds = []
+            for i in range(n):
+                sample = dataset[i]
+                masked = mask_pil_image(
+                    sample["image_pil"], L, sample["seg_mask"], seed=seed_run, idx=i
+                )
+                embed = embed_pil(encoder, masked, transform)
+                masked_embeds.append(F.normalize(embed.unsqueeze(0), dim=-1))
+
+            run_accs = []
+
             correct_per_image = []
             for i in range(n):
                 true_cat = cat_ids[i]
