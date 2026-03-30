@@ -71,6 +71,29 @@ When modifying code, always:
 4. Flag vague names - I default to `x`, `tmp`, `data`
 5. Keep everythin minimal and clear. Don't add abstractions I didn't ask for. One file if possible.
 
+## Visualization Style
+
+### Color
+1 dimension (e.g., diff models) = Tab10
+2 dimension (e.g., diff models * 3 type) = Tab20c
+heatmap -> Blues in Seaborn
+
+### Plot
+PLOT_STYLE = {
+    "linewidth": 2,
+    "std_alpha": 0.2,
+    "tick_width": 2,
+    "tick_labelsize": 14,
+    "label_fontsize": 16,
+    "legend_fontsize": 14,
+    "subplot_title_fontsize": 18,
+    "suptitle_fontsize": 20,
+    "marker": "o",
+    "markersize": 6,
+    "dpi": 150,
+    "subplot_size": (6.4, 4.8),  # (w, h) desired axes area per subplot
+}
+
 ## Git (I often forget to commit)
 After changes, remind me:
 ```

@@ -180,11 +180,87 @@ class FragmentV2Dataset:
         }
 
 
+DEFAULT_COCO_SUBSET_ROOT = (
+    Path(__file__).resolve().parent.parent / "data" / "coco_subset"
+)
+
+
+class COCOSubsetDataset:
+    """COCO val2017 subset: 20 categories x 50 single-dominant-object images.
+
+    Prepared by ``data/prepare_coco.py``. Stores pre-computed binary masks.
+
+    Directory layout:
+      coco_subset/
+        metadata.json
+        images/    *.jpg
+        masks/     *.png (binary foreground)
+
+    Interface matches FragmentV2Dataset: scene_label, scene_id, image_id,
+    object_name (= category name, since COCO has no instance names).
+    """
+
+    def __init__(self, root: str | Path | None = None):
+        self.root = Path(root) if root else DEFAULT_COCO_SUBSET_ROOT
+
+        meta_path = self.root / "metadata.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"COCO subset not prepared. Run:\n"
+                f"  uv run python data/prepare_coco.py\n"
+                f"Expected: {meta_path}"
+            )
+
+        import json
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        self._category_list = meta["categories"]
+        self._cat_to_id = {c: i for i, c in enumerate(self._category_list)}
+
+        self.samples: list[dict] = []
+        for entry in meta["images"]:
+            img_path = self.root / "images" / entry["file_name"]
+            mask_path = self.root / "masks" / entry["file_name"].replace(
+                ".jpg", ".png",
+            )
+            if not img_path.exists():
+                continue
+
+            self.samples.append({
+                "image_path": img_path,
+                "mask_path": mask_path,
+                "image_id": entry["id"],
+                "object_name": entry["name"],
+                "scene_label": entry["category"],
+                "scene_id": self._cat_to_id[entry["category"]],
+            })
+
+        self.scene_labels = list(self._category_list)
+        self.num_scenes = len(self._category_list)
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> dict:
+        s = self.samples[idx]
+        image_pil = Image.open(s["image_path"]).convert("RGB")
+        mask_pil = Image.open(s["mask_path"]).convert("L")
+        seg_mask = (np.array(mask_pil) > 127).astype(np.int32)
+        return {
+            "image_pil": image_pil,
+            "seg_mask": seg_mask,
+            "scene_label": s["scene_label"],
+            "scene_id": s["scene_id"],
+            "image_id": s["image_id"],
+        }
+
+
 def get_dataset(name: str, root: str | None = None, image_type: str = "original"):
     """Factory: load dataset by name.
 
     Args:
-        name: "ade20k" or "fragment_v2"
+        name: "ade20k", "fragment_v2", or "coco_subset"
         root: Optional override for dataset root path.
         image_type: For fragment_v2: "original", "gray", or "lined".
     """
@@ -192,5 +268,9 @@ def get_dataset(name: str, root: str | None = None, image_type: str = "original"
         return ADE20KCompletionDataset(root=root)
     elif name == "fragment_v2":
         return FragmentV2Dataset(root=root, image_type=image_type)
+    elif name == "coco_subset":
+        return COCOSubsetDataset(root=root)
     else:
-        raise ValueError(f"Unknown dataset '{name}'. Choose: ade20k, fragment_v2")
+        raise ValueError(
+            f"Unknown dataset '{name}'. Choose: ade20k, fragment_v2, coco_subset"
+        )
