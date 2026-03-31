@@ -34,11 +34,7 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 import torch
 
 from models.registry import get_encoder
-from src.config import (
-    IMAGE_TYPES,
-    results_for_encoder,
-    results_for_image_type,
-)
+from src.config import IMAGE_TYPES
 from src.dataset import get_dataset
 from src.masking import get_mask_levels, get_visibility_ratio
 from src.utils import extract_val, save_results
@@ -173,7 +169,6 @@ def main() -> None:
         img_type: {"gestalt": {}, "mnemonic": {}, "semantic": {}}
         for img_type in image_types
     }
-    similarity_by_encoder: dict[str, dict[str, dict]] = {}
     unified: dict[str, dict] = {}
 
     # Outer loop: encoder (load once), inner loop: image types
@@ -197,7 +192,6 @@ def main() -> None:
         )
 
         unified[display] = {}
-        similarity_by_encoder[display] = {}
 
         for img_type in image_types:
             dataset = datasets[img_type]
@@ -264,7 +258,6 @@ def main() -> None:
                 sim_result = compute_similarity_analysis(
                     encoder, dataset, seed=args.seed, max_images=args.max_images,
                 )
-                similarity_by_encoder[display][img_type] = sim_result
                 for key in (
                     "mnemonic_target",
                     "mnemonic_all",
@@ -290,30 +283,16 @@ def main() -> None:
         print(f"{'#' * 60}")
         _print_summary(r["gestalt"], r["mnemonic"], r["semantic"])
 
-    # Save similarity analysis per encoder
-    if "similarity" in tasks:
-        for enc_display, results_by_img in similarity_by_encoder.items():
-            if not results_by_img:
-                continue
-            enc_dir = results_for_encoder(enc_display, root=out_root)
-            enc_dir.mkdir(parents=True, exist_ok=True)
-            sim_path = enc_dir / "mnemonic" / "similarity_analysis.json"
-            sim_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(sim_path, "w") as f:
-                json.dump(results_by_img, f, indent=2, default=str)
-            print(f"  Saved: {sim_path}")
-
     print(f"\nAll results saved to: {out_root.resolve()}/")
 
     # Optional plotting
     if args.plot:
-        from .plot import plot_from_results
+        from .plot import plot_from_json
 
-        plot_from_results(
-            results_by_type,
-            similarity_by_encoder,
-            image_types=image_types,
+        plot_from_json(
+            out_root / "results.json",
             out_root=out_root,
+            image_types=image_types,
         )
 
 

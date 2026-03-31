@@ -104,6 +104,7 @@ PLOT_STYLE = {
     "tick_labelsize": 14,
     "label_fontsize": 16,
     "legend_fontsize": 14,
+    "legend_loc": "outside lower center",  # legend below the plot
     "subplot_title_fontsize": 18,
     "suptitle_fontsize": 20,
     "marker": "o",

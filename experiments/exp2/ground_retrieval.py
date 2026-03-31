@@ -91,10 +91,7 @@ _RESULTS_BASE: Path | None = None  # set by --results-dir; None = use default
 def _results_dir() -> Path:
     if _RESULTS_BASE is not None:
         return _RESULTS_BASE
-    base = Path("results/exp2/ground_retrieval")
-    if _DATASET_TAG:
-        return base / _DATASET_TAG / _CFG["tag"]
-    return base / _CFG["tag"]
+    return Path("results/exp2/ground_retrieval") / _DATASET_TAG / _CFG["tag"]
 
 
 def _model_label() -> str:
@@ -332,14 +329,38 @@ def run_retrieval(
     proto_count = proto_count.clamp(min=1)
     img_proto = F.normalize(img_proto / proto_count.unsqueeze(1), dim=-1)
 
-    # 6. Instance text prototype: per-category mean of instance text embeddings
-    txt_proto = torch.zeros(C, D)
-    txt_count = torch.zeros(C)
-    for i in range(n):
-        txt_proto[cat_ids[i]] += instance_gallery[i]
-        txt_count[cat_ids[i]] += 1
-    txt_count = txt_count.clamp(min=1)
-    txt_proto = F.normalize(txt_proto / txt_count.unsqueeze(1), dim=-1)
+    # 6. Concept mean prototype: per-supercategory mean of basic-level concept
+    #    text embeddings. E.g. Animal prototype = mean("cat","dog","horse",...)
+    #    Falls back to per-category mean when no supercategory structure.
+    if has_supercat:
+        S = dataset.num_supercategories
+        # Map each basic-level category to its supercategory
+        cat_to_supercat = {}
+        for i in range(n):
+            cid = cat_ids[i]
+            sid = dataset.samples[i]["supercat_id"]
+            cat_to_supercat[cid] = sid
+        # Mean of basic-level category text embeds within each supercategory
+        concept_proto = torch.zeros(S, D)
+        concept_count = torch.zeros(S)
+        for cid in range(C):
+            if cid not in cat_to_supercat:
+                continue
+            sid = cat_to_supercat[cid]
+            concept_proto[sid] += cat_gallery[cid]
+            concept_count[sid] += 1
+        concept_count = concept_count.clamp(min=1)
+        concept_proto = F.normalize(concept_proto / concept_count.unsqueeze(1), dim=-1)
+    else:
+        # No supercategory: concept mean prototype = per-category text prototype
+        concept_proto = F.normalize(
+            torch.zeros(C, D).scatter_add_(0,
+                torch.tensor(cat_ids).unsqueeze(1).expand(-1, D),
+                instance_gallery,
+            ) / torch.zeros(C).scatter_add_(0, torch.tensor(cat_ids),
+                torch.ones(n)).clamp(min=1).unsqueeze(1),
+            dim=-1,
+        )
 
     sc_str = f", {dataset.num_supercategories} supercategories" if has_supercat else ""
     print(f"  retrieval: {n} images, {C} categories{sc_str}")
@@ -350,31 +371,37 @@ def run_retrieval(
         imgs, _ = _prepare_masked_batch(dataset, transform, L, seed, max_images)
         query = _encode_image(model, imgs)  # [N, D]
 
-        # Task 1: Image retrieval
+        # Task 1: Image retrieval — match masked to complete image (R@1)
         img_metrics = compute_retrieval_metrics(query, image_gallery, gt_instance)
 
-        # Task 2: Instance text retrieval (= category text for COCO)
+        # Task 2: Concept retrieval — match masked to concept text "a photo of {concept}" (R@1)
         txt_metrics = compute_retrieval_metrics(query, instance_gallery, gt_instance)
 
-        # Task 3: Category text retrieval
-        cat_acc = compute_category_accuracy(query, cat_gallery, cat_ids)
-
-        # Task 4: Supercategory text retrieval (COCO only)
-        supercat_acc = (
-            compute_category_accuracy(query, supercat_gallery, supercat_ids)
-            if has_supercat else None
-        )
-
-        # Task 5: Image prototype classification
-        img_proto_acc = compute_category_accuracy(query, img_proto, cat_ids)
-
-        # Task 6: Instance text prototype classification
-        txt_proto_acc = compute_category_accuracy(query, txt_proto, cat_ids)
-
-        # Task 7: Exemplar k-NN majority vote
+        # Task 3: Image k-NN exemplar — majority vote of k nearest images
         exemplar_acc = compute_exemplar_accuracy(
             query, image_gallery, cat_ids, cat_ids, k=10,
         )
+
+        # Task 4: Image mean prototype — classify by per-category image centroid
+        img_proto_acc = compute_category_accuracy(query, img_proto, cat_ids)
+
+        # Task 5: Concept mean prototype — classify by per-supercategory concept centroid
+        if has_supercat:
+            concept_proto_acc = compute_category_accuracy(
+                query, concept_proto, supercat_ids,
+            )
+        else:
+            concept_proto_acc = compute_category_accuracy(
+                query, concept_proto, cat_ids,
+            )
+
+        # Task 6: Category concept — classify by supercategory text "a photo of {category}"
+        if has_supercat:
+            cat_concept_acc = compute_category_accuracy(
+                query, supercat_gallery, supercat_ids,
+            )
+        else:
+            cat_concept_acc = compute_category_accuracy(query, cat_gallery, cat_ids)
 
         level_results = {
             "image_r1": img_metrics["recall_at_1"],
@@ -383,68 +410,27 @@ def run_retrieval(
             "instance_r1": txt_metrics["recall_at_1"],
             "instance_r5": txt_metrics["recall_at_5"],
             "instance_mrr": txt_metrics["mrr"],
-            "category_acc": cat_acc,
             "img_proto_acc": img_proto_acc,
-            "txt_proto_acc": txt_proto_acc,
             "exemplar_acc": exemplar_acc,
+            "concept_proto_acc": concept_proto_acc,
+            "category_acc": cat_concept_acc,
         }
-        if supercat_acc is not None:
-            level_results["supercat_acc"] = supercat_acc
 
         results[str(L)] = level_results
-        sc_part = f"  supercat={supercat_acc:.4f}" if supercat_acc is not None else ""
         print(f"    L={L} vis={vis:.3f}  "
               f"img_r1={img_metrics['recall_at_1']:.4f}  "
               f"txt_r1={txt_metrics['recall_at_1']:.4f}  "
-              f"cat={cat_acc:.4f}  "
+              f"exemplar={exemplar_acc:.4f}  "
               f"img_proto={img_proto_acc:.4f}  "
-              f"exemplar={exemplar_acc:.4f}{sc_part}")
+              f"concept_proto={concept_proto_acc:.4f}  "
+              f"cat_concept={cat_concept_acc:.4f}")
 
     _save_json(results, out / f"results_{image_type}.json")
-    _plot_retrieval(results, image_type, out)
 
-
-def _plot_retrieval(results: dict, image_type: str, out: Path) -> None:
-    """Single plot with retrieval curves.
-
-    Instance-level (red/orange) + category readout (Blues dark-to-light):
-      supercategory > text prototype > image prototype > exemplar k-NN.
-    """
-    levels = list(range(1, 9))
-    vis_x = [get_visibility_ratio(l) for l in levels]
-
-    # Category readout: Tab20c single hue group (indices 0–3 = dark to light)
-    tab20c = plt.colormaps.get_cmap("tab20c")
-    # (key, label, color, linestyle, marker)
-    metrics = [
-        ("image_r1",      "Image R@1",           "tab:yellow",    "-",  "o"),
-        ("instance_r1",   "Instance Text R@1",   "tab:green", "-",  "o"),
-        ("supercat_acc",  "Supercategory Acc",   tab20c(0),    "-",  "s"),
-        ("txt_proto_acc", "Text Prototype Acc",  tab20c(1),    "-",  "^"),
-        ("img_proto_acc", "Image Prototype Acc", tab20c(2),    "-",  "D"),
-        ("exemplar_acc",  "Exemplar k-NN Acc",   tab20c(3),    "-",  "v"),
-    ]
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for key, label, color, ls, marker in metrics:
-        if key not in results["1"]:
-            continue
-        vals = [results[str(l)][key] for l in levels]
-        ax.plot(vis_x, vals, marker=marker, linewidth=2, color=color,
-                label=label, markersize=6, linestyle=ls)
-
-    ax.set_xlabel("Visibility Ratio", fontsize=14)
-    ax.set_ylabel("Score", fontsize=14)
-    ax.set_title(f"{_model_label()} — Retrieval ({image_type})",
-                 fontsize=16, fontweight="bold")
-    ax.set_ylim(0, 1.05)
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    path = out / f"retrieval_{image_type}.png"
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved: {path}")
+    # Plot via shared plot module
+    from .plot import plot_task_comparison
+    save_path = out / f"task_comparison_{image_type}.png"
+    plot_task_comparison(results, save_path, f"{_model_label()} — {image_type}")
 
 
 # ===================================================================
@@ -942,7 +928,7 @@ def main() -> None:
     _CFG = MODEL_CONFIGS[args.model]
     if args.results_dir:
         _RESULTS_BASE = Path(args.results_dir)
-    _DATASET_TAG = "" if args.dataset == "fragment_v2" else args.dataset
+    _DATASET_TAG = "frag" if args.dataset == "fragment_v2" else args.dataset
     print(f"  Model: {_model_label()} ({_num_layers()} layers, "
           f"dim={_internal_dim()}, proj={_proj_dim()})")
     print(f"  Results: {_results_dir()}/")
