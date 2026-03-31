@@ -90,6 +90,9 @@ class TestMnemonic:
         )
         assert "similarity" in result
         assert "retrieval" in result
+        assert "retrieval_r1" in result
+        assert "retrieval_r5" in result
+        assert "retrieval_mrr" in result
         levels = get_mask_levels()
         for L in levels:
             assert L in result["similarity"]
@@ -97,4 +100,5 @@ class TestMnemonic:
             assert "std" in result["similarity"][L]
             assert L in result["retrieval"]
             assert "mean" in result["retrieval"][L]
-            assert "std" in result["retrieval"][L]
+            assert L in result["retrieval_r1"]
+            assert "mean" in result["retrieval_r1"][L]

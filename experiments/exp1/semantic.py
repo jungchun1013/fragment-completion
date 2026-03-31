@@ -23,7 +23,7 @@ def evaluate_semantic(
     max_images: int | None = None,
     num_choices: int = 5,
     num_runs: int = 3,
-) -> dict[str, dict[int, float]]:
+) -> dict[str, dict]:
     """Evaluate semantic completion via category prototype classification.
 
     1. Embed all complete (L=8) images.
@@ -31,16 +31,10 @@ def evaluate_semantic(
     3. At each masking level, K-choice classification among prototypes.
     4. (CLIP only) Also do K-choice zero-shot text matching.
 
-    Args:
-        num_choices: Number of candidate categories per query
-                     (1 correct + num_choices-1 distractors).
-        num_runs: Number of classification runs with different distractor samples
-                  to reduce variance. Results are averaged across runs.
-
     Returns:
         {
-            "prototype_acc": {level: accuracy},
-            "zeroshot_acc":  {level: accuracy},  # only if CLIP
+            "prototype_acc": {level: {mean, std}},
+            "zeroshot_acc":  {level: {mean, std}},  # only if CLIP
         }
     """
     from models.processor import to_transform
@@ -52,7 +46,7 @@ def evaluate_semantic(
     # Step 1: embed all complete images
     print(f"    semantic: embedding {n} complete images for {num_categories} categories...")
     complete_embeds = []
-    cat_ids = []
+    cat_ids: list[int] = []
     for i in range(n):
         sample = dataset[i]
         complete_embeds.append(embed_pil(encoder, sample["image_pil"], transform))
@@ -70,7 +64,6 @@ def evaluate_semantic(
         proto_sum[cid] += complete_mat[i]
         proto_count[cid] += 1
 
-    # Avoid division by zero for categories with no samples in subset
     proto_count = proto_count.clamp(min=1)
     prototypes = F.normalize(proto_sum / proto_count.unsqueeze(1), dim=-1)  # [C, D]
 
@@ -81,9 +74,8 @@ def evaluate_semantic(
     K = min(num_choices, len(active))
 
     # Step 3: K-choice prototype classification, averaged over num_runs
-    proto_acc = {}
+    proto_acc: dict = {}
     for L in levels:
-        # Pre-embed masked images once (deterministic)
         for run in range(num_runs):
             seed_run = seed + run
             rng = np.random.RandomState(seed_run)
@@ -115,9 +107,9 @@ def evaluate_semantic(
         print(f"    semantic [L={L}, vis={vis:.3f}] proto_acc={proto_acc[L]['mean']:.4f}"
               f"±{proto_acc[L]['std']:.4f} (K={K}, {num_runs} runs)")
 
-    result = {"prototype_acc": proto_acc}
+    result: dict = {"prototype_acc": proto_acc}
 
-    # Step 4: CLIP K-choice zero-shot text matching, averaged over num_runs
+    # Step 5: CLIP K-choice zero-shot text matching
     if encoder.name == "CLIP":
         print("    semantic: CLIP zero-shot text matching...")
         tokenizer = open_clip.get_tokenizer("ViT-B-16")
@@ -126,7 +118,7 @@ def evaluate_semantic(
         text_feats = encoder.model.encode_text(tokens)
         text_feats = F.normalize(text_feats.float().cpu(), dim=-1)  # [C, D]
 
-        zs_acc = {}
+        zs_acc: dict = {}
         for L in levels:
             masked_embeds = []
             for i in range(n):

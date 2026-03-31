@@ -72,9 +72,27 @@ def _plot_group(
         plot_metric_vs_masking(
             ret_data,
             "Top-1 Accuracy",
-            "Mnemonic Completion (Retrieval Accuracy)",
+            "Mnemonic Completion (K-choice Retrieval)",
             out_dir / "mnemonic" / "mnemonic_retrieval.png",
         )
+        # Full-rank retrieval metrics (R@1, R@5, MRR)
+        for metric_key, ylabel, title_suffix, fname in [
+            ("retrieval_r1", "R@1", "Full-Rank R@1", "mnemonic_retrieval_full_rank.png"),
+            ("retrieval_r5", "R@5", "Full-Rank R@5", "mnemonic_retrieval_r5.png"),
+            ("retrieval_mrr", "MRR", "Full-Rank MRR", "mnemonic_retrieval_mrr.png"),
+        ]:
+            metric_data = {
+                k: v[metric_key]
+                for k, v in all_mnemonic.items()
+                if metric_key in v
+            }
+            if metric_data:
+                plot_metric_vs_masking(
+                    metric_data,
+                    ylabel,
+                    f"Mnemonic Completion ({title_suffix})",
+                    out_dir / "mnemonic" / fname,
+                )
 
     if all_semantic:
         proto_data = {k: v["prototype_acc"] for k, v in all_semantic.items()}
@@ -211,10 +229,15 @@ def plot_from_json(
             if "gestalt_iou" in metrics:
                 r["gestalt"][enc_display] = metrics["gestalt_iou"]
             if "mnemonic_similarity" in metrics and "mnemonic_retrieval" in metrics:
-                r["mnemonic"][enc_display] = {
+                mnem: dict = {
                     "similarity": metrics["mnemonic_similarity"],
                     "retrieval": metrics["mnemonic_retrieval"],
                 }
+                for k in ("retrieval_r1", "retrieval_r5", "retrieval_mrr"):
+                    json_key = f"mnemonic_{k}"
+                    if json_key in metrics:
+                        mnem[k] = metrics[json_key]
+                r["mnemonic"][enc_display] = mnem
             if "semantic_prototype" in metrics:
                 sem: dict = {"prototype_acc": metrics["semantic_prototype"]}
                 if "semantic_zeroshot" in metrics:

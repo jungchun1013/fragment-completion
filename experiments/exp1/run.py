@@ -230,6 +230,15 @@ def main() -> None:
                 unified[display][img_type]["mnemonic_retrieval"] = mnemonic_result[
                     "retrieval"
                 ]
+                unified[display][img_type]["mnemonic_retrieval_r1"] = mnemonic_result[
+                    "retrieval_r1"
+                ]
+                unified[display][img_type]["mnemonic_retrieval_r5"] = mnemonic_result[
+                    "retrieval_r5"
+                ]
+                unified[display][img_type]["mnemonic_retrieval_mrr"] = mnemonic_result[
+                    "retrieval_mrr"
+                ]
                 print(f"  mnemonic done in {time.time() - t2:.1f}s\n")
 
             if "semantic" in tasks:

@@ -6,9 +6,9 @@ Subcommands:
     all         Both
 
 Usage:
-    uv run python visualize.py gestalt --image-idx 0 --encoders clip mae dino
-    uv run python visualize.py embedding --image-idx 0 --encoders clip mae dino
-    uv run python visualize.py all --image-idx 0
+    uv run python -m analysis.visualize gestalt --image-idx 0 --encoders clip mae dino
+    uv run python -m analysis.visualize embedding --image-idx 0 --encoders clip mae dino
+    uv run python -m analysis.visualize gestalt --out-dir results/exp1 --image-idx 0
 """
 
 import argparse
@@ -23,54 +23,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 from models.registry import get_encoder
+from experiments.exp1.gestalt import _segment_iou
 from src.config import results_visualizations
 from src.dataset import get_dataset
 from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image
-from src.utils import extract_patch_features
-
-
-# ---------------------------------------------------------------------------
-# Gestalt visualization
-# ---------------------------------------------------------------------------
-
-def _segment_image(encoder, masked_pil, gt_fg):
-    """Run 2-means segmentation. Returns (pred_fg mask at GT resolution, IoU)."""
-    patch_feats = extract_patch_features(encoder, masked_pil)
-    N, D = patch_feats.shape
-    gh = gw = int(round(N ** 0.5))
-    if gh * gw != N:
-        for h in range(int(N ** 0.5), 0, -1):
-            if N % h == 0:
-                gh, gw = h, N // h
-                break
-
-    feats_np = patch_feats.float().numpy()
-    kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(feats_np)
-    label_grid = labels.reshape(gh, gw)
-
-    H, W = gt_fg.shape
-    label_img = np.array(
-        Image.fromarray(label_grid.astype(np.uint8)).resize((W, H), Image.NEAREST)
-    )
-
-    best_iou = 0.0
-    best_pred = None
-    for fg_label in [0, 1]:
-        pred = (label_img == fg_label).astype(np.float32)
-        intersection = (pred * gt_fg).sum()
-        union = ((pred + gt_fg) > 0).sum()
-        iou = intersection / (union + 1e-8)
-        if iou > best_iou:
-            best_iou = iou
-            best_pred = pred
-
-    return best_pred, float(best_iou)
 
 
 @torch.no_grad()
@@ -108,7 +68,7 @@ def visualize_gestalt(encoder_names, dataset, image_idx, out_dir,
 
         for L in levels:
             masked = mask_pil_image(pil, L, seg_mask, seed=seed, idx=image_idx)
-            pred_fg, iou = _segment_image(encoder, masked, gt_fg)
+            iou, _sil, pred_fg = _segment_iou(encoder, masked, gt_fg, return_mask=True)
 
             pred_resized = np.array(
                 Image.fromarray((pred_fg * 255).astype(np.uint8)).resize(
