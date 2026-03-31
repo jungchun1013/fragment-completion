@@ -8,33 +8,39 @@ Root: /nfs/turbo/coe-chaijy/jungchun/vault/a-architecture/sandbox/fragment-compl
 Python 3.x, PyTorch, NumPy, Hydra, uv, Slurm
 
 ## Key Paths
-  fragment-completion/          
-  ├── run.py              # main entry point
-  ├── data/               # dataset
-  ├── configs/            # Hydra configs (don't modify without permission)
-  ├── src/                # unit experiments and utils
-  ├── models/             # models (ignore other subfolders)              
-  │   ├── __init__.py     # re-exports
-  │   ├── encoder.py       # BaseEncoder ABC                         
-  │   ├── processor.py     # ImageProcessor, to_transform
-  │   ├── registry.py       # get_encoder(), register()
-  │   └── encoders/         # all encoder implementations          
-  │       ├── clip.py                                              
-  │       ├── dino.py                                                                 
-  │       ├── dinov2.py  
-  │       └── ...
-  ├── scripts/            # scripts for running experiments and testing
-  ├── results/            # output results
-  │   ├── results.json        # aggregated metrics
-  │   ├── completion_summary.png
-  │   ├── gestalt/            # gestalt_iou, gestalt_silhouette, gestalt_vis_{img_id}
-  │   ├── mnemonic/           # mnemonic_similarity, mnemonic_retrieval, similarity_analysis
-  │   ├── semantic/           # semantic_prototype, semantic_zeroshot (CLIP)
-  │   ├── all_encoders/       # multi-encoder comparisons (same subdir layout)
-  │   ├── encoders/           # per-encoder results (same subdir layout)
-  │   ├── image_types/        # by variant (same subdir layout)
-  │   └── _deprecated/        # legacy experiment runs
-  └── analysis/           # plotting, analysis, visualization
+  fragment-completion/
+  ├── models/                 # encoder registry (unchanged)
+  │   ├── encoder.py          # BaseEncoder ABC
+  │   ├── processor.py        # ImageProcessor, to_transform
+  │   ├── registry.py         # get_encoder(), register()
+  │   └── encoders/           # clip.py, dino.py, dinov2.py, ...
+  ├── src/                    # shared infrastructure
+  │   ├── config.py           # encoder metadata, plot style, result paths
+  │   ├── dataset.py          # FragmentV2, ADE20K, COCOSubset loaders
+  │   ├── masking.py          # progressive patch-level masking
+  │   ├── utils.py            # embedding, plotting, retrieval metrics
+  │   ├── experiment_config.py # MODEL_CONFIGS, save_experiment_settings
+  │   └── metrics/srss.py     # SRSS metric
+  ├── experiments/
+  │   ├── exp1/               # Exp 1: all-encoder fragment completion
+  │   │   ├── run.py          # entry point: uv run python -m experiments.exp1.run
+  │   │   ├── gestalt.py      # gestalt completion task
+  │   │   ├── mnemonic.py     # mnemonic completion task
+  │   │   ├── semantic.py     # semantic completion task
+  │   │   ├── similarity.py   # similarity analysis task
+  │   │   └── plot.py         # standalone plotting from results.json
+  │   └── exp2/               # Exp 2: CLIP + DINOv2 interpretability
+  │       ├── clip_interp.py  # CLIP mechanistic interpretability
+  │       ├── dinov2_interp.py # DINOv2 mechanistic interpretability
+  │       ├── ground_retrieval.py # ground-truth retrieval experiments
+  │       └── plot.py         # regenerate plots from JSON
+  ├── analysis/               # cross-experiment visualization
+  ├── tests/                  # pytest unit tests
+  ├── results/
+  │   ├── exp1/               # all-encoder results + plots
+  │   └── exp2/               # interpretability results
+  ├── data/                   # datasets
+  └── scripts/                # shell scripts
 
 ## Datasets
 - **Fragment V2** (primary): 260 white-background object images, 3 variants each (original, gray, lined)
@@ -46,7 +52,18 @@ Python 3.x, PyTorch, NumPy, Hydra, uv, Slurm
 
 ## Run Experiments
 ```bash
-uv run python run.py <hydra overrides>
+# Exp 1: all encoders, fragment completion
+uv run python -m experiments.exp1.run --encoders clip mae dino ijepa vit_sup
+uv run python -m experiments.exp1.run --max-images 5 --tasks gestalt
+uv run python -m experiments.exp1.plot --results results/exp1/results.json
+
+# Exp 2: CLIP / DINOv2 interpretability
+uv run python -m experiments.exp2.ground_retrieval --model clip retrieve
+uv run python -m experiments.exp2.clip_interp zeroshot --max-images 10
+uv run python -m experiments.exp2.dinov2_interp all
+
+# Tests
+uv run pytest tests/ -v
 ```
 
 ## File Header (new files)

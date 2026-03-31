@@ -1,0 +1,15 @@
+trajectories/
+recordings/
+outputs/
+__pycache__/
+.pytest_cache/
+*.png
+*.jpg
+.env
+*.pyc
+.venv/
+
+results/
+*.json
+EXPERIMENT.md
+JOURNAL.md

@@ -1,18 +1,15 @@
 #!/bin/bash
-# Full pipeline: run all encoders, all image types, all tasks.
+# Exp 1: run all encoders, all image types, all tasks.
 set -e
 cd "$(dirname "$0")/.."
 
 ENCODERS="clip mae dino dinov2 ijepa vit_sup"
 IMAGE_TYPES="original gray lined"
 
-uv run python run.py \
+uv run python -m experiments.exp1.run \
     --encoders $ENCODERS \
     --image-type $IMAGE_TYPES \
-    --out-dir results
+    --out-dir results/exp1 \
+    --plot
 
-uv run python plot.py all \
-    --results results/results.json \
-    --out-dir results
-
-echo "Done. Results in results/"
+echo "Done. Results in results/exp1/"
