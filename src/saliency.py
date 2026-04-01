@@ -156,6 +156,7 @@ def clip_gradcam(
         def _fwd_hook(
             mod: nn.Module, inp: tuple, out: torch.Tensor,
         ) -> None:
+            out.retain_grad()
             activation_store.append(out)
 
         handle = last_block.register_forward_hook(_fwd_hook)
@@ -163,41 +164,17 @@ def clip_gradcam(
         try:
             # Forward with gradients
             activation_store.clear()
+            model.zero_grad()
             image_features = model.encode_image(batch)  # [B, proj_dim]
             image_features = F.normalize(image_features.float(), dim=-1)
 
             # Cosine similarity per image
             sim = (image_features * text_batch.float()).sum(dim=-1)  # [B]
-            loss = sim.sum()
-
-            # Backprop
-            model.zero_grad()
-            loss.backward()
+            sim.sum().backward()
 
             # Get activation and its gradient
-            act = activation_store[0]  # [B, T, D] — full token sequence
-            grad = act.grad  # [B, T, D]
-
-            if grad is None:
-                # Activation wasn't a leaf — re-register with retain_grad
-                handle.remove()
-
-                activation_store.clear()
-
-                def _fwd_hook_retain(
-                    mod: nn.Module, inp: tuple, out: torch.Tensor,
-                ) -> None:
-                    out.retain_grad()
-                    activation_store.append(out)
-
-                handle = last_block.register_forward_hook(_fwd_hook_retain)
-                model.zero_grad()
-                image_features = model.encode_image(batch)
-                image_features = F.normalize(image_features.float(), dim=-1)
-                sim = (image_features * text_batch.float()).sum(dim=-1)
-                sim.sum().backward()
-                act = activation_store[0]
-                grad = act.grad
+            act = activation_store[0]  # [B, T, D]
+            grad = act.grad           # [B, T, D]
 
             # GradCAM: patch tokens only (skip CLS at position 0)
             # act: [B, T, D], grad: [B, T, D]

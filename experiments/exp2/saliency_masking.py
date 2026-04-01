@@ -419,19 +419,17 @@ def run_evaluate(
 # ---------------------------------------------------------------------------
 
 def run_plot() -> None:
-    """Generate comparison plots from saved results."""
+    """Generate one task-comparison plot per (condition, encoder) pair."""
     from .plot import _plot_tasks, RETRIEVAL_TASKS
-
-    levels = get_mask_levels()
+    import json
 
     # Load all results
     all_data: dict[str, dict[str, dict]] = {}  # {condition: {encoder: data}}
     for condition in CONDITIONS:
         all_data[condition] = {}
-        for enc_name in ["clip", "dinov2"]:
+        for enc_name in ["dinov2", "clip"]:
             path = RESULTS_DIR / condition / enc_name / "results.json"
             if path.exists():
-                import json
                 with open(path) as f:
                     all_data[condition][enc_name] = json.load(f)
 
@@ -442,26 +440,11 @@ def run_plot() -> None:
     plot_dir = RESULTS_DIR / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Within-model: 3 conditions per encoder ---
-    # One plot per encoder per readout task
-    for enc_name in ["clip", "dinov2"]:
-        for condition in CONDITIONS:
-            if enc_name not in all_data[condition]:
-                continue
-            data = all_data[condition][enc_name]
-            save_path = plot_dir / f"task_{enc_name}_{condition}.png"
-            title = f"{MODELS[enc_name]['label']} — {condition}"
-            _plot_tasks(data, RETRIEVAL_TASKS, save_path, title)
-
-    # --- Cross-model: 2 encoders per condition ---
     for condition in CONDITIONS:
-        for enc_name in ["clip", "dinov2"]:
-            if enc_name not in all_data[condition]:
-                continue
-            data = all_data[condition][enc_name]
-            save_path = plot_dir / f"task_{condition}_{enc_name}.png"
-            title = f"{condition} — {MODELS[enc_name]['label']}"
-            _plot_tasks(data, RETRIEVAL_TASKS, save_path, title)
+        for enc_name, enc_data in all_data[condition].items():
+            save_path = plot_dir / f"{condition}_{enc_name}.png"
+            title = f"{MODELS[enc_name]['label']} — {condition}"
+            _plot_tasks(enc_data, RETRIEVAL_TASKS, save_path, title)
 
     print(f"  Plots saved to {plot_dir}/")
 
