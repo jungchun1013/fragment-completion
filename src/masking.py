@@ -116,3 +116,66 @@ def mask_pil_image(
             img_np[y0:y1, x0:x1] = 255
 
     return Image.fromarray(img_np)
+
+
+def mask_pil_image_saliency(
+    pil: Image.Image,
+    level: int,
+    seg_mask: np.ndarray,
+    saliency: np.ndarray,
+    salient_first: bool = True,
+    patch_size: int = 16,
+    target_size: int = 224,
+) -> Image.Image:
+    """Apply saliency-based progressive patch masking.
+
+    Instead of random patch order, patches are sorted by saliency score.
+    salient_first=True removes the most salient patches first — at low
+    visibility, only non-salient patches remain.
+
+    Args:
+        pil: Input PIL image.
+        level: Masking level 1..8 (1 = most masked, 8 = full).
+        seg_mask: Segmentation mask (original resolution).
+        saliency: [gh, gw] per-patch saliency scores (higher = more important).
+        salient_first: If True, most salient patches are hidden first.
+        patch_size: Size of each square patch.
+        target_size: Resize image to this before masking.
+
+    Returns:
+        Masked PIL image at target_size × target_size.
+    """
+    pil = pil.resize((target_size, target_size), Image.BILINEAR)
+    img_np = np.array(pil)
+
+    fg_patches = _find_foreground_patches(img_np, seg_mask, patch_size, target_size)
+
+    if not fg_patches or level >= NUM_LEVELS:
+        return Image.fromarray(img_np)
+
+    # Sort foreground patches by saliency score
+    # salient_first: highest saliency last in the list (revealed last = hidden first)
+    fg_with_score = [
+        (row, col, float(saliency[row, col])) for row, col in fg_patches
+    ]
+    # Sort ascending by saliency: least salient first (will be revealed first)
+    if salient_first:
+        fg_with_score.sort(key=lambda x: x[2])
+    else:
+        fg_with_score.sort(key=lambda x: -x[2])
+
+    sorted_patches = [(row, col) for row, col, _ in fg_with_score]
+
+    # Number of foreground patches to reveal
+    vis_ratio = get_visibility_ratio(level)
+    num_visible = int(vis_ratio * len(sorted_patches))
+    visible_set = set(sorted_patches[:num_visible])
+
+    # Mask non-visible foreground patches
+    for row, col in sorted_patches:
+        if (row, col) not in visible_set:
+            y0, y1 = row * patch_size, (row + 1) * patch_size
+            x0, x1 = col * patch_size, (col + 1) * patch_size
+            img_np[y0:y1, x0:x1] = 255
+
+    return Image.fromarray(img_np)

@@ -39,8 +39,9 @@ _TAB20C = plt.cm.tab20c.colors
 
 # Task definitions: (candidate_keys, display_label, color)
 # candidate_keys supports old and new key names for backwards compatibility.
-# Row 1 (legend): Retrieval tasks.  Row 2: Categorization tasks.
 # Blues: dark = conceptual, light = perceptual.
+
+# All 6 tasks combined
 RETRIEVAL_TASKS = [
     # Retrieval
     (["image_r1"],                         "Image Retrieval",         _TAB20C[9]),
@@ -49,6 +50,19 @@ RETRIEVAL_TASKS = [
     (["img_proto_acc"],                    "Image Mean Prototype",    _TAB20C[2]),
     (["category_acc", "supercat_acc"],     "Category Retrieval",      _TAB20C[0]),
     (["concept_proto_acc", "txt_proto_acc"], "Concept Mean Prototype", _TAB20C[1]),
+]
+
+# Split views
+TASKS_RETRIEVAL = [
+    (["image_r1"],     "Image Retrieval",   _TAB20C[9]),
+    (["instance_r1"],  "Concept Retrieval", _TAB20C[5]),
+]
+
+TASKS_CATEGORIZATION = [
+    (["category_acc", "supercat_acc"],      "Category Retrieval",      _TAB20C[0]),
+    (["concept_proto_acc", "txt_proto_acc"], "Concept Mean Prototype", _TAB20C[1]),
+    (["img_proto_acc"],                     "Image Mean Prototype",    _TAB20C[2]),
+    (["exemplar_acc"],                      "Image k-NN Exemplar",     _TAB20C[3]),
 ]
 
 
@@ -116,24 +130,30 @@ def plot_probe_heatmap(
     print(f"  Saved: {save_path}")
 
 
-def plot_task_comparison(
+def _plot_tasks(
     data: dict,
+    tasks: list[tuple],
     save_path: Path,
-    title: str = "Task Comparison",
+    title: str,
+    ylabel: str = "Accuracy / R@1",
+    ncol: int = 3,
 ) -> None:
-    """Plot all retrieval tasks on one figure.
+    """Plot a set of tasks on one figure.
 
     Args:
         data: Level-keyed results dict, e.g. {"1": {"image_r1": 0.5, ...}, ...}
+        tasks: List of (candidate_keys, label, color) tuples.
         save_path: Output .png path.
         title: Plot title.
+        ylabel: Y-axis label.
+        ncol: Number of legend columns.
     """
     levels = get_mask_levels()
     vis = [get_visibility_ratio(L) for L in levels]
 
     fig, ax = plt.subplots(figsize=PS["subplot_size"])
     handles = []
-    for keys, label, color in RETRIEVAL_TASKS:
+    for keys, label, color in tasks:
         k = _find_key(data["1"], keys)
         if k is None:
             continue
@@ -146,7 +166,7 @@ def plot_task_comparison(
         handles.append(h)
 
     ax.set_xlabel("Visibility Ratio", fontsize=PS["label_fontsize"])
-    ax.set_ylabel("Accuracy / R@1", fontsize=PS["label_fontsize"])
+    ax.set_ylabel(ylabel, fontsize=PS["label_fontsize"])
     ax.set_title(title, fontsize=PS["subplot_title_fontsize"], fontweight="bold")
     ax.tick_params(labelsize=PS["tick_labelsize"], width=PS["tick_width"])
     ax.set_ylim(-0.02, 1.05)
@@ -157,13 +177,40 @@ def plot_task_comparison(
     fig.legend(
         handles=handles, loc="lower center",
         bbox_to_anchor=(0.5, -0.18),
-        ncol=3, fontsize=PS["legend_fontsize"], frameon=True,
+        ncol=ncol, fontsize=PS["legend_fontsize"], frameon=True,
     )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, dpi=PS["dpi"], bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {save_path}")
+
+
+def plot_task_comparison(
+    data: dict,
+    save_path: Path,
+    title: str = "Task Comparison",
+) -> None:
+    """Plot all 6 retrieval + categorization tasks on one figure."""
+    _plot_tasks(data, RETRIEVAL_TASKS, save_path, title)
+
+
+def plot_retrieval_only(
+    data: dict,
+    save_path: Path,
+    title: str = "Retrieval",
+) -> None:
+    """Plot Image Retrieval + Concept Retrieval only."""
+    _plot_tasks(data, TASKS_RETRIEVAL, save_path, title, ylabel="R@1", ncol=2)
+
+
+def plot_categorization_only(
+    data: dict,
+    save_path: Path,
+    title: str = "Categorization",
+) -> None:
+    """Plot categorization tasks only (4 blue lines, dark→light = conceptual→perceptual)."""
+    _plot_tasks(data, TASKS_CATEGORIZATION, save_path, title, ylabel="Accuracy", ncol=2)
 
 
 def plot_retrieval(
@@ -195,8 +242,10 @@ def plot_retrieval(
         enc_name = results_dir.name  # e.g. "dinov2", "clip_L14"
         default_title = f"{enc_name} — {img_type}"
 
-        out_path = retrieval_dir / f"task_comparison_{img_type}.png"
-        plot_task_comparison(data, out_path, title or default_title)
+        t = title or default_title
+        plot_task_comparison(data, retrieval_dir / f"task_comparison_{img_type}.png", t)
+        plot_retrieval_only(data, retrieval_dir / f"retrieval_{img_type}.png", f"{t} — Retrieval")
+        plot_categorization_only(data, retrieval_dir / f"categorization_{img_type}.png", f"{t} — Categorization")
 
 
 # ---------------------------------------------------------------------------
