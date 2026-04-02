@@ -55,6 +55,61 @@ class TestComputeRetrievalMetrics:
             assert 0.0 <= result[key] <= 1.0, f"{key}={result[key]} out of range"
 
 
+class TestBuildKchoiceCandidates:
+    """Tests for _build_kchoice_candidates (cross-instance retrieval)."""
+
+    def test_target_is_different_from_query(self):
+        """Target should be a different image, not the query itself."""
+        from experiments.exp2.ground_retrieval import _build_kchoice_candidates
+        import numpy as np
+
+        cat_to_indices = {0: [0, 1, 2], 1: [3, 4], 2: [5, 6, 7]}
+        rng = np.random.RandomState(42)
+        candidates = _build_kchoice_candidates(
+            query_idx=0, query_cat=0,
+            cat_to_indices=cat_to_indices,
+            unique_cats=[0, 1, 2], rng=rng,
+        )
+        # Index 0 = correct target; must NOT be the query itself
+        assert candidates[0] != 0
+        # Target must be from same category
+        assert candidates[0] in cat_to_indices[0]
+
+
+
+    def test_singleton_category_returns_none(self):
+        """If query's category has only 1 image, return None."""
+        from experiments.exp2.ground_retrieval import _build_kchoice_candidates
+        import numpy as np
+
+        cat_to_indices = {0: [0], 1: [1, 2], 2: [3, 4]}
+        rng = np.random.RandomState(42)
+        result = _build_kchoice_candidates(
+            query_idx=0, query_cat=0,
+            cat_to_indices=cat_to_indices,
+            unique_cats=[0, 1, 2], rng=rng,
+        )
+        assert result is None
+
+    def test_one_distractor_per_other_category(self):
+        """Should have 1 correct + 1 distractor per other category."""
+        from experiments.exp2.ground_retrieval import _build_kchoice_candidates
+        import numpy as np
+
+        cat_to_indices = {0: [0, 1], 1: [2, 3], 2: [4, 5], 3: [6, 7]}
+        rng = np.random.RandomState(42)
+        candidates = _build_kchoice_candidates(
+            query_idx=0, query_cat=0,
+            cat_to_indices=cat_to_indices,
+            unique_cats=[0, 1, 2, 3], rng=rng,
+        )
+        # 1 target + 3 distractors = 4 total
+        assert len(candidates) == 4
+        # Distractors are from other categories
+        for dist in candidates[1:]:
+            assert dist not in cat_to_indices[0]
+
+
 class TestComputeCategoryAccuracy:
     """Tests for compute_category_accuracy."""
 

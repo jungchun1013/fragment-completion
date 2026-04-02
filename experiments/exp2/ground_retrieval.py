@@ -47,10 +47,6 @@ from src.utils import (
     compute_category_accuracy,
     compute_exemplar_accuracy,
     compute_retrieval_metrics,
-    extract_block_attn,
-    extract_block_cls,
-    make_attn_hook,
-    prepare_masked_batch,
     save_json,
 )
 
@@ -91,7 +87,7 @@ _RESULTS_BASE: Path | None = None  # set by --results-dir; None = use default
 def _results_dir() -> Path:
     if _RESULTS_BASE is not None:
         return _RESULTS_BASE
-    return Path("results/exp2/ground_retrieval") / _DATASET_TAG / _CFG["tag"]
+    return Path("results/exp2/retrieval_16") / _DATASET_TAG / _CFG["tag"]
 
 
 def _model_label() -> str:
@@ -223,15 +219,51 @@ def _project_cls(
 _save_json = save_json  # alias for backward compat within file
 
 
+def _build_kchoice_candidates(
+    query_idx: int,
+    query_cat: int,
+    cat_to_indices: dict[int, list[int]],
+    unique_cats: list[int],
+    rng: np.random.RandomState,
+) -> list[int] | None:
+    """Build candidate list for C-way K-choice cross-instance retrieval.
+
+    Target is a *different* image from the same category (not the query itself).
+    Returns None if the query's category has only one image.
+    """
+    same_cat = [j for j in cat_to_indices[query_cat] if j != query_idx]
+    if not same_cat:
+        return None
+    target = rng.choice(same_cat)
+    candidates = [target]
+    for c in unique_cats:
+        if c == query_cat:
+            continue
+        candidates.append(rng.choice(cat_to_indices[c]))
+    return candidates
+
+
 def _prepare_masked_batch(
     dataset: object, transform: object, level: int, seed: int,
     max_images: int | None = None,
 ) -> tuple[torch.Tensor, list[int]]:
-    """Thin wrapper: uses model-specific target_size from _CFG."""
-    target_size = _CFG["img_size"] if not _is_clip() else None
-    return prepare_masked_batch(
-        dataset, transform, level, seed, max_images, target_size,
-    )
+    """Generate masked images for a given level and stack as tensor."""
+    from src.masking import mask_pil_image
+    n = min(len(dataset), max_images) if max_images else len(dataset)
+    target_size = _CFG["img_size"]
+    patch_size = _CFG.get("patch_size", 16)
+    tensors: list[torch.Tensor] = []
+    indices: list[int] = []
+    for i in range(n):
+        sample = dataset[i]
+        masked = mask_pil_image(
+            sample["image_pil"], level, sample["seg_mask"],
+            patch_size=patch_size, target_size=target_size,
+            seed=seed, idx=i,
+        )
+        tensors.append(transform(masked))
+        indices.append(i)
+    return torch.stack(tensors), indices
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +275,7 @@ def _extract_all_cls(
     model: nn.Module, imgs: torch.Tensor, batch_size: int = 16,
 ) -> list[torch.Tensor]:
     """CLS token from each layer via hooks."""
+    from src.utils import extract_block_cls
     return extract_block_cls(model, _get_blocks(model), imgs,
                              _num_layers(), batch_size)
 
@@ -251,6 +284,7 @@ def _extract_attn_acts(
     model: nn.Module, imgs: torch.Tensor, batch_size: int = 32,
 ) -> list[torch.Tensor]:
     """Attn activations from each layer via hooks."""
+    from src.utils import extract_block_attn
     return extract_block_attn(model, _get_blocks(model), imgs,
                               _num_layers(), batch_size)
 
@@ -268,11 +302,13 @@ def run_retrieval(
     max_images: int | None = None,
     seed: int = 42,
     device: str = "cuda",
+    num_runs: int = 3,
 ) -> None:
-    """Run 5 retrieval tasks across 8 masking levels.
+    """Run retrieval + categorization tasks across 8 masking levels.
 
     Tasks:
-        1. Image retrieval: query=masked, gallery=complete images (R@1)
+        1. Image retrieval: C-way concept-constrained K-choice (1 correct +
+           1 distractor per other category), averaged over num_runs.
         2. Instance text retrieval: query=masked, gallery=instance text embeds (R@1)
         3. Category text retrieval: query=masked, gallery=category text embeds (acc)
         4. Image prototype: per-category mean of complete image embeds (acc)
@@ -319,7 +355,14 @@ def run_retrieval(
     gt_instance = torch.arange(n, dtype=torch.long)  # each image matches itself
     cat_ids = [dataset[i]["scene_id"] for i in range(n)]
 
-    # 5. Image prototype: per-category mean of complete image embeddings
+    # Category → image indices mapping (for concept-constrained K-choice)
+    from collections import defaultdict
+    cat_to_indices: dict[int, list[int]] = defaultdict(list)
+    for i in range(n):
+        cat_to_indices[cat_ids[i]].append(i)
+    unique_cats = sorted(cat_to_indices.keys())
+
+    # 5. Image prototype: per-category mean of complete image embeddings (for proto retrieval)
     D = image_gallery.shape[1]
     img_proto = torch.zeros(C, D)
     proto_count = torch.zeros(C)
@@ -328,6 +371,9 @@ def run_retrieval(
         proto_count[cat_ids[i]] += 1
     proto_count = proto_count.clamp(min=1)
     img_proto = F.normalize(img_proto / proto_count.unsqueeze(1), dim=-1)
+
+    # GT for proto/text retrieval (C-way category)
+    gt_cat = torch.tensor(cat_ids, dtype=torch.long)
 
     # 6. Concept mean prototype: per-supercategory mean of basic-level concept
     #    text embeddings. E.g. Animal prototype = mean("cat","dog","horse",...)
@@ -351,6 +397,19 @@ def run_retrieval(
             concept_count[sid] += 1
         concept_count = concept_count.clamp(min=1)
         concept_proto = F.normalize(concept_proto / concept_count.unsqueeze(1), dim=-1)
+
+        # 7. Image mean prototype per supercategory (sample 2 images per category)
+        rng_proto = np.random.RandomState(seed)
+        img_supercat_proto = torch.zeros(S, D)
+        for cid in range(C):
+            if cid not in cat_to_supercat:
+                continue
+            cat_indices = [i for i in range(n) if cat_ids[i] == cid]
+            sampled = rng_proto.choice(cat_indices, size=min(2, len(cat_indices)), replace=False)
+            sid = cat_to_supercat[cid]
+            for si in sampled:
+                img_supercat_proto[sid] += image_gallery[si]
+        img_supercat_proto = F.normalize(img_supercat_proto, dim=-1)
     else:
         # No supercategory: concept mean prototype = per-category text prototype
         concept_proto = F.normalize(
@@ -361,9 +420,12 @@ def run_retrieval(
                 torch.ones(n)).clamp(min=1).unsqueeze(1),
             dim=-1,
         )
+        img_supercat_proto = None
 
     sc_str = f", {dataset.num_supercategories} supercategories" if has_supercat else ""
-    print(f"  retrieval: {n} images, {C} categories{sc_str}")
+    C_active = len(unique_cats)
+    print(f"  retrieval: {n} images, {C} categories{sc_str}, "
+          f"{C_active}-way K-choice image retrieval ({num_runs} runs)")
     results: dict[str, dict] = {}
 
     for L in levels:
@@ -371,47 +433,82 @@ def run_retrieval(
         imgs, _ = _prepare_masked_batch(dataset, transform, L, seed, max_images)
         query = _encode_image(model, imgs)  # [N, D]
 
-        # Task 1: Image retrieval — match masked to complete image (R@1)
-        img_metrics = compute_retrieval_metrics(query, image_gallery, gt_instance)
+        # --- Retrieval tasks (C-way, basic-level) ---
+        # Image retrieval: C-way concept-constrained K-choice
+        # Target = different image from same category (cross-instance)
+        # 1 correct (same-concept, diff image) + 1 distractor per other category
+        run_r1: list[float] = []
+        run_r5: list[float] = []
+        run_mrr: list[float] = []
+        for run in range(num_runs):
+            rng = np.random.RandomState(seed + run)
+            r1 = r5 = mrr_val = 0.0
+            n_eval = 0
+            for i in range(n):
+                candidates = _build_kchoice_candidates(
+                    i, cat_ids[i], cat_to_indices, unique_cats, rng,
+                )
+                if candidates is None:
+                    continue  # skip singleton categories
+                cand_embeds = image_gallery[candidates]  # [C_active, D]
+                sims = query[i] @ cand_embeds.T  # [C_active]
+                rank = (sims > sims[0]).sum().item()
+                if rank < 1:
+                    r1 += 1
+                if rank < 5:
+                    r5 += 1
+                mrr_val += 1.0 / (rank + 1)
+                n_eval += 1
+            denom = max(n_eval, 1)
+            run_r1.append(r1 / denom)
+            run_r5.append(r5 / denom)
+            run_mrr.append(mrr_val / denom)
+        img_metrics = {
+            "recall_at_1": float(np.mean(run_r1)),
+            "recall_at_5": float(np.mean(run_r5)),
+            "mrr": float(np.mean(run_mrr)),
+        }
+        # Prototype retrieval: masked → C category image prototypes (C-way)
+        proto_metrics = compute_retrieval_metrics(query, img_proto, gt_cat)
+        # Text retrieval: masked → C category text embeddings (C-way)
+        txt_metrics = compute_retrieval_metrics(query, cat_gallery, gt_cat)
 
-        # Task 2: Concept retrieval — match masked to concept text "a photo of {concept}" (R@1)
-        txt_metrics = compute_retrieval_metrics(query, instance_gallery, gt_instance)
-
-        # Task 3: Image k-NN exemplar — majority vote of k nearest images
-        exemplar_acc = compute_exemplar_accuracy(
-            query, image_gallery, cat_ids, cat_ids, k=10,
-        )
-
-        # Task 4: Image mean prototype — classify by per-category image centroid
-        img_proto_acc = compute_category_accuracy(query, img_proto, cat_ids)
-
-        # Task 5: Concept mean prototype — classify by per-supercategory concept centroid
+        # --- Categorization tasks (4-way, supercategory) ---
         if has_supercat:
+            exemplar_acc = compute_exemplar_accuracy(
+                query, image_gallery, supercat_ids, supercat_ids, k=10,
+            )
+            img_proto_acc_val = compute_category_accuracy(
+                query, img_supercat_proto, supercat_ids,
+            )
             concept_proto_acc = compute_category_accuracy(
                 query, concept_proto, supercat_ids,
             )
-        else:
-            concept_proto_acc = compute_category_accuracy(
-                query, concept_proto, cat_ids,
-            )
-
-        # Task 6: Category concept — classify by supercategory text "a photo of {category}"
-        if has_supercat:
             cat_concept_acc = compute_category_accuracy(
                 query, supercat_gallery, supercat_ids,
             )
         else:
+            exemplar_acc = compute_exemplar_accuracy(
+                query, image_gallery, cat_ids, cat_ids, k=10,
+            )
+            img_proto_acc_val = compute_category_accuracy(query, img_proto, cat_ids)
+            concept_proto_acc = compute_category_accuracy(
+                query, concept_proto, cat_ids,
+            )
             cat_concept_acc = compute_category_accuracy(query, cat_gallery, cat_ids)
 
         level_results = {
             "image_r1": img_metrics["recall_at_1"],
             "image_r5": img_metrics["recall_at_5"],
             "image_mrr": img_metrics["mrr"],
+            "proto_r1": proto_metrics["recall_at_1"],
+            "proto_r5": proto_metrics["recall_at_5"],
+            "proto_mrr": proto_metrics["mrr"],
             "instance_r1": txt_metrics["recall_at_1"],
             "instance_r5": txt_metrics["recall_at_5"],
             "instance_mrr": txt_metrics["mrr"],
-            "img_proto_acc": img_proto_acc,
             "exemplar_acc": exemplar_acc,
+            "img_proto_acc": img_proto_acc_val,
             "concept_proto_acc": concept_proto_acc,
             "category_acc": cat_concept_acc,
         }
@@ -419,11 +516,12 @@ def run_retrieval(
         results[str(L)] = level_results
         print(f"    L={L} vis={vis:.3f}  "
               f"img_r1={img_metrics['recall_at_1']:.4f}  "
+              f"proto_r1={proto_metrics['recall_at_1']:.4f}  "
               f"txt_r1={txt_metrics['recall_at_1']:.4f}  "
               f"exemplar={exemplar_acc:.4f}  "
-              f"img_proto={img_proto_acc:.4f}  "
+              f"img_proto={img_proto_acc_val:.4f}  "
               f"concept_proto={concept_proto_acc:.4f}  "
-              f"cat_concept={cat_concept_acc:.4f}")
+              f"cat={cat_concept_acc:.4f}")
 
     _save_json(results, out / f"results_{image_type}.json")
 
@@ -604,6 +702,7 @@ def run_activation_patching(
 
     Metric: instance text retrieval R@1 (all N candidates, deterministic).
     """
+    from src.utils import make_attn_hook
     out = _results_dir() / "patching"
     out.mkdir(parents=True, exist_ok=True)
 
