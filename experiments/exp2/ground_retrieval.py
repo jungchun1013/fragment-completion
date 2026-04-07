@@ -84,7 +84,8 @@ def _proj_dim() -> int:
 _RESULTS_BASE: Path | None = None  # set by --results-dir; None = use default
 
 # Image-prototype k-sweep (COCO only): k = number of same-category images
-# averaged into each per-instance prototype.
+# averaged into each per-category prototype. Saturation observed by k≈20
+# on COCO; pushing beyond doesn't change the curves.
 PROTO_K_EXCL: tuple[int, ...] = (1, 2, 5, 10, 20)
 PROTO_K_INCL: tuple[int, ...] = (1, 2, 5, 10, 20)
 SWEEP_RESULTS_BASE = Path("results/exp2-sweep")
@@ -254,47 +255,112 @@ def _build_kchoice_candidates(
     return candidates
 
 
-def _build_image_proto_gallery(
+def _build_base_cat_proto_gallery(
     image_gallery: torch.Tensor,
+    cat_to_indices: dict[int, list[int]],
+    k: int,
+    rng: np.random.RandomState,
+) -> torch.Tensor:
+    """Build C category prototypes, each = mean of k random same-cat images.
+
+    Query-independent base gallery: each cat's prototype is k random images
+    from that category. Used for "other" cats in the per-query rebuild loop
+    (the query's own cat gets re-sampled per-query to enforce the
+    include/exclude target semantics).
+
+    Args:
+        image_gallery: [N, D] L2-normalized complete-image embeddings (CPU).
+        cat_to_indices: category id -> list of instance indices in that cat.
+        k: number of images to average per category.
+        rng: numpy RandomState for reproducible sampling.
+
+    Returns:
+        [C, D] L2-normalized category prototype gallery (CPU).
+    """
+    cat_keys = sorted(cat_to_indices.keys())
+    C = len(cat_keys)
+    D = image_gallery.shape[1]
+    proto = torch.zeros(C, D)
+    for c in cat_keys:
+        members = rng.choice(
+            cat_to_indices[c], size=k, replace=False,
+        ).tolist()
+        proto[c] = image_gallery[members].mean(dim=0)
+    return F.normalize(proto, dim=-1)
+
+
+def _eval_proto_k_sweep(
+    query: torch.Tensor,
+    image_gallery: torch.Tensor,
+    base_gallery: torch.Tensor,
     cat_to_indices: dict[int, list[int]],
     cat_ids: list[int],
     k: int,
     include_target: bool,
     rng: np.random.RandomState,
-) -> torch.Tensor:
-    """Per-instance image prototype: mean of k same-category complete images.
+) -> dict[str, float]:
+    """C-way categorization with per-query rebuild of the query's own cat.
 
-    For each instance i, samples k same-category images and averages their
-    complete-image embeddings into a prototype. With ``include_target``, the
-    instance i itself is always one of the k members (the remaining k-1 are
-    sampled from same-category others); without it, all k are sampled from
-    same-category others, excluding i.
+    For each query i in cat c_i:
+      - Other cats c ≠ c_i use ``base_gallery[c]`` (k random same-cat images,
+        query-independent).
+      - The query's own cat c_i is rebuilt per-query:
+          * include_target: members = [i] + (k-1) random same-cat-others
+          * exclude_target: members = k random same-cat-others (excluding i)
+      - Compute sim(query[i], gallery) over C cats and rank c_i.
+      - R@1 = top-1 acc, R@5 = top-5 acc (out of C), MRR = 1/(rank+1).
 
     Args:
-        image_gallery: [N, D] L2-normalized complete-image embeddings (CPU).
-        cat_to_indices: category id -> list of instance indices in that cat.
+        query: [N, D] L2-normalized masked-image query embeddings.
+        image_gallery: [N, D] L2-normalized complete-image embeddings.
+        base_gallery: [C, D] L2-normalized base category prototypes.
+        cat_to_indices: category id -> list of instance indices.
         cat_ids: per-instance category id.
-        k: number of images to average.
-        include_target: if True, prototype_i always includes i.
-        rng: numpy RandomState for reproducible sampling.
+        k: number of images per prototype.
+        include_target: whether the query's own image is in its cat prototype.
+        rng: numpy RandomState for per-query sampling.
 
     Returns:
-        [N, D] L2-normalized prototype gallery (CPU).
+        Dict with recall_at_1, recall_at_5, mrr.
     """
-    n, d = image_gallery.shape
-    proto = torch.zeros(n, d)
+    n = query.shape[0]
+    C = base_gallery.shape[0]
+    r1 = r5 = mrr_val = 0.0
     for i in range(n):
-        same_cat_others = [j for j in cat_to_indices[cat_ids[i]] if j != i]
+        c_i = cat_ids[i]
+        same_cat_others = [j for j in cat_to_indices[c_i] if j != i]
         if include_target:
-            extra = (
-                rng.choice(same_cat_others, size=k - 1, replace=False).tolist()
-                if k > 1 else []
-            )
-            members = [i, *extra]
+            if k == 1:
+                members = [i]
+            else:
+                extra = rng.choice(
+                    same_cat_others, size=k - 1, replace=False,
+                ).tolist()
+                members = [i, *extra]
         else:
-            members = rng.choice(same_cat_others, size=k, replace=False).tolist()
-        proto[i] = image_gallery[members].mean(dim=0)
-    return F.normalize(proto, dim=-1)
+            members = rng.choice(
+                same_cat_others, size=k, replace=False,
+            ).tolist()
+        proto_ci = image_gallery[members].mean(dim=0)
+        proto_ci = F.normalize(proto_ci, dim=0)
+
+        # Substitute the query's own cat in a local copy.
+        local = base_gallery.clone()
+        local[c_i] = proto_ci
+
+        sims = query[i] @ local.T  # [C]
+        ranked = sims.argsort(descending=True).tolist()
+        rank = ranked.index(c_i)
+        if rank < 1:
+            r1 += 1
+        if rank < 5:
+            r5 += 1
+        mrr_val += 1.0 / (rank + 1)
+    return {
+        "recall_at_1": r1 / n,
+        "recall_at_5": r5 / n,
+        "mrr": mrr_val / n,
+    }
 
 
 def _cross_instance_metrics(
@@ -462,29 +528,33 @@ def run_retrieval(
     proto_count = proto_count.clamp(min=1)
     img_proto = F.normalize(img_proto / proto_count.unsqueeze(1), dim=-1)
 
-    # 5b. Per-instance image prototype k-sweep (COCO only).
-    # Built from complete-image embeddings, so independent of masking level —
-    # sample once here and reuse the same gallery across all 8 levels.
-    proto_k_galleries: dict[str, torch.Tensor] = {}
+    # 5b. Per-CATEGORY image prototype k-sweep (COCO only). Each k yields
+    # a base gallery of C category prototypes built from k random images
+    # per category. The query's own cat is rebuilt per-query in
+    # _eval_proto_k_sweep to enforce include/exclude target semantics.
+    # Base galleries are query-independent and masking-level-independent,
+    # so we build them once outside the level loop.
+    proto_k_base: dict[int, torch.Tensor] = {}
     if dataset_name != "fragment_v2":
+        all_ks = sorted(set(PROTO_K_EXCL) | set(PROTO_K_INCL))
         min_cat = min(len(v) for v in cat_to_indices.values())
-        k_max = max(max(PROTO_K_EXCL), max(PROTO_K_INCL))
-        if min_cat - 1 < k_max:
+        # excl needs k same-cat OTHERS → cat must have ≥ k+1
+        # incl needs target + k-1 same-cat OTHERS → cat must have ≥ k
+        excl_req = (max(PROTO_K_EXCL) + 1) if PROTO_K_EXCL else 0
+        incl_req = max(PROTO_K_INCL) if PROTO_K_INCL else 0
+        required = max(excl_req, incl_req)
+        if min_cat < required:
             print(f"  [warn] smallest category has {min_cat} images "
-                  f"(need >= {k_max + 1} for k={k_max}); skipping k-sweep")
+                  f"(need >= {required} for the requested k-sweep); "
+                  f"skipping k-sweep")
         else:
-            rng_proto_k = np.random.RandomState(seed)
-            for k in PROTO_K_EXCL:
-                proto_k_galleries[f"img_proto_excl_k{k}"] = _build_image_proto_gallery(
-                    image_gallery, cat_to_indices, cat_ids, k,
-                    include_target=False, rng=rng_proto_k,
+            rng_proto_base = np.random.RandomState(seed)
+            for k in all_ks:
+                proto_k_base[k] = _build_base_cat_proto_gallery(
+                    image_gallery, cat_to_indices, k, rng=rng_proto_base,
                 )
-            for k in PROTO_K_INCL:
-                proto_k_galleries[f"img_proto_incl_k{k}"] = _build_image_proto_gallery(
-                    image_gallery, cat_to_indices, cat_ids, k,
-                    include_target=True, rng=rng_proto_k,
-                )
-            print(f"  built {len(proto_k_galleries)} image-prototype galleries "
+            print(f"  built {len(proto_k_base)} base category proto "
+                  f"galleries (k={all_ks}); per-query rebuild for own cat "
                   f"(excl k={list(PROTO_K_EXCL)}, incl k={list(PROTO_K_INCL)})")
 
     # GT for proto/text retrieval (C-way category)
@@ -578,39 +648,54 @@ def run_retrieval(
             "text_mrr": txt_metrics["mrr"],
         }
 
-        # Image-prototype k-sweep (COCO only): same cross-instance metric
-        # against per-instance prototype galleries built outside the loop.
-        for tag, proto_gallery in proto_k_galleries.items():
-            proto_sims = query @ proto_gallery.T  # [N, N]
-            proto_metrics = _cross_instance_metrics(
-                proto_sims, cat_to_indices, cat_ids, n,
+        # Image-prototype k-sweep: C-way categorization (20 cats for COCO).
+        # The query's own cat prototype is rebuilt per-query to enforce
+        # include/exclude target semantics; other cats use the base gallery.
+        # R@1 = top-1 cat acc, R@5 = top-5 cat acc (out of C), MRR = mean
+        # reciprocal rank of the true cat. Each (k, mode) combo gets its
+        # own deterministic RNG seeded from `seed` so re-runs match.
+        for k in PROTO_K_EXCL:
+            metrics = _eval_proto_k_sweep(
+                query, image_gallery, proto_k_base[k],
+                cat_to_indices, cat_ids, k,
+                include_target=False,
+                rng=np.random.RandomState(seed + k),
             )
-            level_results[f"{tag}_r1"] = proto_metrics["recall_at_1"]
-            level_results[f"{tag}_r5"] = proto_metrics["recall_at_5"]
-            level_results[f"{tag}_mrr"] = proto_metrics["mrr"]
+            level_results[f"img_proto_excl_k{k}_r1"] = metrics["recall_at_1"]
+            level_results[f"img_proto_excl_k{k}_r5"] = metrics["recall_at_5"]
+            level_results[f"img_proto_excl_k{k}_mrr"] = metrics["mrr"]
+        for k in PROTO_K_INCL:
+            metrics = _eval_proto_k_sweep(
+                query, image_gallery, proto_k_base[k],
+                cat_to_indices, cat_ids, k,
+                include_target=True,
+                rng=np.random.RandomState(seed + 1000 + k),
+            )
+            level_results[f"img_proto_incl_k{k}_r1"] = metrics["recall_at_1"]
+            level_results[f"img_proto_incl_k{k}_r5"] = metrics["recall_at_5"]
+            level_results[f"img_proto_incl_k{k}_mrr"] = metrics["mrr"]
 
-        # Sanity check: incl k=1 prototype is the target image itself, so the
-        # cross-instance metric must (modulo FP rank-tie noise) reproduce
-        # image_r1 / r5 / mrr. F.normalize re-normalizing already-normalized
-        # vectors introduces 1-2 ULP perturbations that can flip near-tied
-        # ranks, so we use a slack of 1e-3 (>> single rank-flip impact of
-        # ~1/N ≈ 1.7e-3 for R@1 with N=600 — catches real bugs, ignores
-        # FP noise).
-        if "img_proto_incl_k1_r1" in level_results and cross_instance:
-            for suffix in ("r1", "r5", "mrr"):
-                a = level_results[f"img_proto_incl_k1_{suffix}"]
-                b = level_results[f"image_{suffix}"]
-                assert abs(a - b) < 2e-3, (
-                    f"incl_k1 must equal image retrieval (sanity check): "
-                    f"{suffix} got {a:.6f} vs {b:.6f}"
-                )
+        # Sanity check (full visibility only): at L=8 the query equals
+        # image_i, and incl_k1 builds prototype_{cat(i)} = image_i alone,
+        # so sim(query_i, proto_{cat(i)}) = 1.0 — strictly the highest of
+        # the C cat prototypes (other prototypes are different images,
+        # cosine sim < 1.0). Top-1 acc must be ~1.0.
+        if "img_proto_incl_k1_r1" in level_results and vis >= 0.99:
+            r1_incl_k1 = level_results["img_proto_incl_k1_r1"]
+            assert r1_incl_k1 > 1.0 - 5e-3, (
+                f"incl_k1 C-way top-1 acc should be ~1.0 at full visibility "
+                f"(query's own cat prototype = self); got {r1_incl_k1:.6f} "
+                f"at L={L}"
+            )
 
         results[str(L)] = level_results
         sweep_summary = ""
-        if proto_k_galleries:
+        if proto_k_base:
             sweep_summary = (
-                f"  excl_k5_r1={level_results['img_proto_excl_k5_r1']:.4f}"
-                f"  incl_k5_r1={level_results['img_proto_incl_k5_r1']:.4f}"
+                f"  excl_k1_r1={level_results['img_proto_excl_k1_r1']:.4f}"
+                f"  incl_k1_r1={level_results['img_proto_incl_k1_r1']:.4f}"
+                f"  excl_k20_r1={level_results['img_proto_excl_k20_r1']:.4f}"
+                f"  incl_k20_r1={level_results['img_proto_incl_k20_r1']:.4f}"
             )
         print(f"    L={L} vis={vis:.3f}  "
               f"img_r1={img_metrics['recall_at_1']:.4f}  "
@@ -628,7 +713,7 @@ def run_retrieval(
     plot_task_comparison(results, save_path, f"{_model_label()} — {image_type}")
 
     # k-sweep plot (skipped automatically when no proto keys are present).
-    if proto_k_galleries:
+    if proto_k_base:
         sweep_base = out / f"proto_k_sweep_{image_type}.png"
         plot_proto_k_sweep(
             results, sweep_base,
@@ -1108,7 +1193,8 @@ def main() -> None:
                         choices=list(MODEL_CONFIGS.keys()),
                         help="Model: clip (ViT-L-14) or dinov2 (dino.txt)")
     parser.add_argument("--dataset", default="fragment_v2",
-                        choices=["fragment_v2", "ade20k", "coco_subset"])
+                        choices=["fragment_v2", "ade20k", "coco_subset",
+                                 "coco_subset_56"])
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--image-type", default="original",
                         choices=["original", "gray", "lined"])
