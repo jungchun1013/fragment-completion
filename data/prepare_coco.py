@@ -51,7 +51,8 @@ COCO_ANN_URL = (
     "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 )
 
-# 4 Rosch-style natural superordinate categories x 5 basic-level categories
+# Default variant: 4 Rosch-style natural superordinate categories x 5
+# basic-level categories.
 TARGET_SUPERCATEGORIES: dict[str, list[str]] = {
     "animal":    ["cat", "dog", "horse", "elephant", "cow"],
     "vehicle":   ["bus", "car", "motorcycle", "truck", "train"],
@@ -59,7 +60,29 @@ TARGET_SUPERCATEGORIES: dict[str, list[str]] = {
     "food":      ["pizza", "cake", "sandwich", "banana", "broccoli"],
 }
 
-CATS_PER_SUPERCAT = 5     # 4 supercategories x 5 = 20 categories
+# 56-variant: all COCO val2017 categories with >=30 single-dominant-object
+# images passing the bbox >=96x96 filter, minus uncommon ones (person:
+# excluded as too broad and only member of its supercat; fire hydrant and
+# kite: niche). 11 supercategories x variable count = 56 categories.
+TARGET_SUPERCATEGORIES_56: dict[str, list[str]] = {
+    "animal":     ["cat", "dog", "horse", "giraffe", "elephant",
+                   "zebra", "bird", "cow", "sheep", "bear"],
+    "vehicle":    ["bus", "train", "car", "truck", "motorcycle",
+                   "airplane", "bicycle", "boat"],
+    "furniture":  ["dining table", "chair", "couch", "bed", "toilet",
+                   "potted plant"],
+    "food":       ["pizza", "cake", "sandwich", "banana", "broccoli",
+                   "orange", "hot dog", "donut", "apple"],
+    "electronic": ["laptop", "tv", "keyboard", "cell phone"],
+    "indoor":     ["teddy bear", "book", "clock", "vase"],
+    "kitchen":    ["bowl", "cup", "bottle", "fork"],
+    "accessory":  ["umbrella", "suitcase", "handbag", "backpack"],
+    "sports":     ["skateboard", "tennis racket", "surfboard"],
+    "appliance":  ["oven", "refrigerator", "sink"],
+    "outdoor":    ["bench"],
+}
+
+CATS_PER_SUPERCAT = 5     # default variant: 4 supercategories x 5 = 20
 IMAGES_PER_CAT = 30
 MIN_BBOX_SIDE = 96        # minimum bbox width AND height in pixels
 BBOX_PAD_RATIO = 0.1      # 10% padding around bbox crop
@@ -181,8 +204,25 @@ def prepare(
     data_root: Path,
     raw_root: Path | None = None,
     seed: int = 42,
+    targets: dict[str, list[str]] | None = None,
+    cats_per_supercat: int | None = None,
 ) -> None:
-    """Main preparation pipeline."""
+    """Main preparation pipeline.
+
+    Args:
+        data_root: Output directory for the prepared subset.
+        raw_root: Where to download/cache raw COCO data.
+        seed: RNG seed for image selection.
+        targets: Mapping supercategory -> ordered candidate cat names. Defaults
+            to ``TARGET_SUPERCATEGORIES`` (4×5).
+        cats_per_supercat: Max categories to keep per supercat. Defaults to
+            ``CATS_PER_SUPERCAT``. Pass a large number (e.g. 99) to take all
+            qualifying cats from each supercategory in ``targets``.
+    """
+    if targets is None:
+        targets = TARGET_SUPERCATEGORIES
+    if cats_per_supercat is None:
+        cats_per_supercat = CATS_PER_SUPERCAT
     raw_root = raw_root or (data_root.parent / "coco_raw")
     raw_root.mkdir(parents=True, exist_ok=True)
     data_root.mkdir(parents=True, exist_ok=True)
@@ -207,11 +247,11 @@ def prepare(
     cat_to_supercat: dict[str, str] = {}
     all_selected: list[dict] = []
 
-    for supercat, candidates_list in TARGET_SUPERCATEGORIES.items():
-        print(f"\n  [{supercat}] (target: {CATS_PER_SUPERCAT} categories)")
+    for supercat, candidates_list in targets.items():
+        print(f"\n  [{supercat}] (target: {cats_per_supercat} categories)")
         picked = 0
         for cat_name in candidates_list:
-            if picked >= CATS_PER_SUPERCAT:
+            if picked >= cats_per_supercat:
                 break
 
             if cat_name not in name_to_catid:
@@ -248,8 +288,8 @@ def prepare(
             print(f"    {cat_name}: {len(candidates)} candidates -> "
                   f"selected {IMAGES_PER_CAT}")
 
-        if picked < CATS_PER_SUPERCAT:
-            print(f"    WARNING: only {picked}/{CATS_PER_SUPERCAT} categories "
+        if picked < cats_per_supercat:
+            print(f"    WARNING: only {picked}/{cats_per_supercat} categories "
                   f"for [{supercat}]")
 
     print(f"\n  Total: {len(selected_supercats)} supercategories, "
@@ -314,7 +354,7 @@ def prepare(
         "filter_cfg": {
             "min_bbox_side": MIN_BBOX_SIDE,
             "bbox_pad_ratio": BBOX_PAD_RATIO,
-            "cats_per_supercat": CATS_PER_SUPERCAT,
+            "cats_per_supercat": cats_per_supercat,
             "images_per_cat": IMAGES_PER_CAT,
             "seed": seed,
         },
@@ -332,14 +372,27 @@ def prepare(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare COCO val2017 subset")
-    parser.add_argument("--data-root", type=Path,
-                        default=Path("data/coco_subset"))
+    parser.add_argument("--variant", choices=["default", "56"], default="default",
+                        help="default: 4 supercats x 5 cats. 56: all 11 supercats, "
+                             "auto cap each at the supercat's qualifying count.")
+    parser.add_argument("--data-root", type=Path, default=None,
+                        help="Output directory. Defaults: data/coco_subset for "
+                             "default variant, data/coco_subset_56 for 56.")
     parser.add_argument("--raw-root", type=Path, default=None,
                         help="Where to download/cache raw COCO data")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    prepare(args.data_root, args.raw_root, args.seed)
+    if args.variant == "56":
+        targets = TARGET_SUPERCATEGORIES_56
+        cats_per_supercat = max(len(v) for v in TARGET_SUPERCATEGORIES_56.values())
+        data_root = args.data_root or Path("data/coco_subset_56")
+    else:
+        targets = TARGET_SUPERCATEGORIES
+        cats_per_supercat = CATS_PER_SUPERCAT
+        data_root = args.data_root or Path("data/coco_subset")
+
+    prepare(data_root, args.raw_root, args.seed, targets, cats_per_supercat)
 
 
 if __name__ == "__main__":

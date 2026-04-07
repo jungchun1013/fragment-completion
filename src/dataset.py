@@ -275,7 +275,7 @@ def get_dataset(name: str, root: str | None = None, image_type: str = "original"
     """Factory: load dataset by name.
 
     Args:
-        name: "ade20k", "fragment_v2", or "coco_subset"
+        name: "ade20k", "fragment_v2", "coco_subset", or "coco_subset_56"
         root: Optional override for dataset root path.
         image_type: For fragment_v2: "original", "gray", or "lined".
     """
@@ -285,7 +285,13 @@ def get_dataset(name: str, root: str | None = None, image_type: str = "original"
         return FragmentV2Dataset(root=root, image_type=image_type)
     elif name == "coco_subset":
         return COCOSubsetDataset(root=root)
+    elif name == "coco_subset_56":
+        default_root = (
+            Path(__file__).resolve().parent.parent / "data" / "coco_subset_56"
+        )
+        return COCOSubsetDataset(root=root or default_root)
     else:
         raise ValueError(
-            f"Unknown dataset '{name}'. Choose: ade20k, fragment_v2, coco_subset"
+            f"Unknown dataset '{name}'. Choose: ade20k, fragment_v2, "
+            f"coco_subset, coco_subset_56"
         )
