@@ -198,6 +198,11 @@ class COCOSubsetDataset:
 
     Interface matches FragmentV2Dataset: scene_label, scene_id, image_id,
     object_name (= category name, since COCO has no instance names).
+
+    Additionally exposes supercategory info:
+      - supercategory_labels: list of supercategory names
+      - num_supercategories: count
+      - samples[i]["supercategory"] / samples[i]["supercat_id"]
     """
 
     def __init__(self, root: str | Path | None = None):
@@ -218,6 +223,11 @@ class COCOSubsetDataset:
         self._category_list = meta["categories"]
         self._cat_to_id = {c: i for i, c in enumerate(self._category_list)}
 
+        # Supercategory info
+        self._supercat_list = meta.get("supercategories", [])
+        self._supercat_to_id = {s: i for i, s in enumerate(self._supercat_list)}
+        self._cat_to_supercat = meta.get("cat_to_supercat", {})
+
         self.samples: list[dict] = []
         for entry in meta["images"]:
             img_path = self.root / "images" / entry["file_name"]
@@ -227,6 +237,7 @@ class COCOSubsetDataset:
             if not img_path.exists():
                 continue
 
+            supercat = entry.get("supercategory", "")
             self.samples.append({
                 "image_path": img_path,
                 "mask_path": mask_path,
@@ -234,10 +245,14 @@ class COCOSubsetDataset:
                 "object_name": entry["name"],
                 "scene_label": entry["category"],
                 "scene_id": self._cat_to_id[entry["category"]],
+                "supercategory": supercat,
+                "supercat_id": self._supercat_to_id.get(supercat, -1),
             })
 
         self.scene_labels = list(self._category_list)
         self.num_scenes = len(self._category_list)
+        self.supercategory_labels = list(self._supercat_list)
+        self.num_supercategories = len(self._supercat_list)
 
     def __len__(self) -> int:
         return len(self.samples)

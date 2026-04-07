@@ -26,7 +26,7 @@ def _patch_extract(monkeypatch):
     import torch
     import src.utils as utils_mod
 
-    def _fake_extract(encoder, pil):
+    def _fake_extract(encoder, pil, transform=None):
         return torch.randn(196, 64)
 
     monkeypatch.setattr(utils_mod, "extract_patch_features", _fake_extract)
@@ -86,10 +86,9 @@ class TestMnemonic:
 
         result = evaluate_mnemonic(
             mock_encoder, tiny_dataset, seed=42, max_images=2,
-            num_choices=2, num_runs=1,
+            num_runs=1,
         )
         assert "similarity" in result
-        assert "retrieval" in result
         assert "retrieval_r1" in result
         assert "retrieval_r5" in result
         assert "retrieval_mrr" in result
@@ -98,7 +97,5 @@ class TestMnemonic:
             assert L in result["similarity"]
             assert "mean" in result["similarity"][L]
             assert "std" in result["similarity"][L]
-            assert L in result["retrieval"]
-            assert "mean" in result["retrieval"][L]
             assert L in result["retrieval_r1"]
             assert "mean" in result["retrieval_r1"][L]

@@ -138,7 +138,6 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-images", type=int, default=None)
-    parser.add_argument("--choices", type=int, default=5)
     parser.add_argument(
         "--plot",
         action="store_true",
@@ -160,7 +159,6 @@ def main() -> None:
         print(f"  {len(ds)} images, {ds.num_scenes} scenes (using {n})")
 
     print(f"  Tasks  : {sorted(tasks)}")
-    print(f"  Choices: {args.choices}")
     print(f"  Levels : {get_mask_levels()}")
     print()
 
@@ -215,14 +213,10 @@ def main() -> None:
                 t2 = time.time()
                 mnemonic_result = evaluate_mnemonic(
                     encoder, dataset, seed=args.seed, max_images=args.max_images,
-                    num_choices=args.choices,
                 )
                 r["mnemonic"][display] = mnemonic_result
                 unified[display][img_type]["mnemonic_similarity"] = mnemonic_result[
                     "similarity"
-                ]
-                unified[display][img_type]["mnemonic_retrieval"] = mnemonic_result[
-                    "retrieval"
                 ]
                 unified[display][img_type]["mnemonic_retrieval_r1"] = mnemonic_result[
                     "retrieval_r1"
@@ -240,7 +234,6 @@ def main() -> None:
                 t3 = time.time()
                 semantic_result = evaluate_semantic(
                     encoder, dataset, seed=args.seed, max_images=args.max_images,
-                    num_choices=args.choices,
                 )
                 r["semantic"][display] = semantic_result
                 unified[display][img_type]["semantic_prototype"] = semantic_result[

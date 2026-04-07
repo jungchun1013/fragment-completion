@@ -1,5 +1,6 @@
 import torch
 from PIL import Image
+from torchvision import transforms as T
 
 
 class ImageProcessor:
@@ -29,3 +30,31 @@ def to_transform(processor):
     def _transform(img):
         return proc(img, return_tensors="pt")["pixel_values"].squeeze(0)
     return _transform
+
+
+def get_normalize_transform(processor) -> T.Compose:
+    """Return a ToTensor + Normalize transform (no spatial resize/crop).
+
+    Use this for images that have already been spatially prepared
+    (center-cropped and resized to the encoder's target resolution)
+    via ``masking.prepare_image`` or ``masking.mask_pil_image``.
+    """
+    if isinstance(processor, ImageProcessor):
+        # Extract Normalize from the existing torchvision pipeline
+        for tr in processor.transform.transforms:
+            if isinstance(tr, T.Normalize):
+                return T.Compose([T.ToTensor(), tr])
+        # Fallback: ImageNet defaults
+        return T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+    # HuggingFace processor — extract mean/std from its config
+    proc = getattr(processor, "image_processor", processor)
+    mean = getattr(proc, "image_mean", [0.485, 0.456, 0.406])
+    std = getattr(proc, "image_std", [0.229, 0.224, 0.225])
+    return T.Compose([
+        T.ToTensor(),
+        T.Normalize(mean=list(mean), std=list(std)),
+    ])

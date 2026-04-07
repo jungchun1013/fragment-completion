@@ -74,23 +74,17 @@ def _plot_gestalt(all_gestalt: dict, out_dir: Path) -> None:
 
 
 def _plot_mnemonic(all_mnemonic: dict, out_dir: Path) -> None:
-    """Plot mnemonic similarity, K-choice retrieval, and full-rank metrics."""
-    sim_data = {k: v["similarity"] for k, v in all_mnemonic.items()}
-    ret_data = {k: v["retrieval"] for k, v in all_mnemonic.items()}
-    plot_metric_vs_masking(
-        sim_data,
-        "Cosine Similarity",
-        "Mnemonic Completion (Embedding Similarity)",
-        out_dir / "mnemonic" / "mnemonic_similarity.png",
-    )
-    plot_metric_vs_masking(
-        ret_data,
-        "Top-1 Accuracy",
-        "Mnemonic Completion (K-choice Retrieval)",
-        out_dir / "mnemonic" / "mnemonic_retrieval.png",
-    )
+    """Plot mnemonic similarity and full-rank retrieval metrics."""
+    sim_data = {k: v["similarity"] for k, v in all_mnemonic.items() if "similarity" in v}
+    if sim_data:
+        plot_metric_vs_masking(
+            sim_data,
+            "Cosine Similarity",
+            "Mnemonic Completion (Embedding Similarity)",
+            out_dir / "mnemonic" / "mnemonic_similarity.png",
+        )
     for metric_key, ylabel, title_suffix, fname in [
-        ("retrieval_r1", "R@1", "Full-Rank R@1", "mnemonic_retrieval_full_rank.png"),
+        ("retrieval_r1", "R@1", "Full-Rank R@1", "mnemonic_retrieval_r1.png"),
         ("retrieval_r5", "R@5", "Full-Rank R@5", "mnemonic_retrieval_r5.png"),
         ("retrieval_mrr", "MRR", "Full-Rank MRR", "mnemonic_retrieval_mrr.png"),
     ]:
@@ -305,10 +299,9 @@ def _unified_to_views(
             r = results_by_type[img_type]
             if "gestalt_iou" in metrics:
                 r["gestalt"][enc_display] = metrics["gestalt_iou"]
-            if "mnemonic_similarity" in metrics and "mnemonic_retrieval" in metrics:
+            if "mnemonic_similarity" in metrics:
                 mnem: dict = {
                     "similarity": metrics["mnemonic_similarity"],
-                    "retrieval": metrics["mnemonic_retrieval"],
                 }
                 for k in ("retrieval_r1", "retrieval_r5", "retrieval_mrr"):
                     if f"mnemonic_{k}" in metrics:

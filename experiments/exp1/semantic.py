@@ -10,9 +10,10 @@ import torch.nn.functional as F
 import open_clip
 
 from models.encoder import BaseEncoder
+from models.processor import get_normalize_transform
 
-from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image
-from src.utils import embed_pil
+from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image, prepare_image
+from src.utils import embed_pil, get_encoder_geometry
 
 
 @torch.no_grad()
@@ -21,15 +22,16 @@ def evaluate_semantic(
     dataset,
     seed: int = 42,
     max_images: int | None = None,
-    num_choices: int = 5,
     num_runs: int = 3,
 ) -> dict[str, dict]:
-    """Evaluate semantic completion via category prototype classification.
+    """Evaluate semantic completion via full-rank prototype classification.
 
     1. Embed all complete (L=8) images.
     2. Build per-category prototypes = mean of member embeddings.
-    3. At each masking level, K-choice classification among prototypes.
-    4. (CLIP only) Also do K-choice zero-shot text matching.
+    3. At each masking level, classify against ALL category prototypes.
+    4. (CLIP only) Also classify against ALL text embeddings (zero-shot).
+
+    Each run uses a different mask seed; accuracy is averaged across runs.
 
     Returns:
         {
@@ -37,23 +39,25 @@ def evaluate_semantic(
             "zeroshot_acc":  {level: {mean, std}},  # only if CLIP
         }
     """
-    from models.processor import to_transform
-    transform = to_transform(encoder.processor)
+    img_size, patch_size = get_encoder_geometry(encoder)
+    norm_transform = get_normalize_transform(encoder.processor)
     levels = get_mask_levels()
     n = min(len(dataset), max_images) if max_images else len(dataset)
     num_categories = dataset.num_scenes
 
-    # Step 1: embed all complete images
+    # Step 1: embed all complete images (same spatial prep as masking)
     print(f"    semantic: embedding {n} complete images for {num_categories} categories...")
     complete_embeds = []
     cat_ids: list[int] = []
     for i in range(n):
         sample = dataset[i]
-        complete_embeds.append(embed_pil(encoder, sample["image_pil"], transform))
+        pil = prepare_image(sample["image_pil"], img_size)
+        complete_embeds.append(embed_pil(encoder, pil, norm_transform))
         cat_ids.append(sample["scene_id"])
 
     complete_mat = torch.stack(complete_embeds)  # [N, D]
     complete_mat = F.normalize(complete_mat, dim=-1)
+    cat_ids_t = torch.tensor(cat_ids, dtype=torch.long)
 
     # Step 2: build category prototypes (mean of members)
     D = complete_mat.shape[1]
@@ -69,47 +73,43 @@ def evaluate_semantic(
 
     cat_labels = dataset.scene_labels
     active = [i for i in range(num_categories) if proto_count[i] > 0]
+    active_protos = prototypes[active]  # [C_active, D]
+    # Map original cat_id → index in active list
+    active_idx = {cat: idx for idx, cat in enumerate(active)}
     print(f"    semantic: {len(active)} active categories with prototypes")
 
-    K = min(num_choices, len(active))
-
-    # Step 3: K-choice prototype classification, averaged over num_runs
+    # Step 3: full-rank prototype classification, averaged over num_runs
     proto_acc: dict = {}
     for L in levels:
+        run_accs: list[float] = []
         for run in range(num_runs):
             seed_run = seed + run
-            rng = np.random.RandomState(seed_run)
             masked_embeds = []
             for i in range(n):
                 sample = dataset[i]
                 masked = mask_pil_image(
-                    sample["image_pil"], L, sample["seg_mask"], seed=seed_run, idx=i
+                    sample["image_pil"], L, sample["seg_mask"], seed=seed_run, idx=i,
+                    patch_size=patch_size, target_size=img_size,
                 )
-                embed = embed_pil(encoder, masked, transform)
-                masked_embeds.append(F.normalize(embed.unsqueeze(0), dim=-1))
+                embed = embed_pil(encoder, masked, norm_transform)
+                masked_embeds.append(embed)
 
-            run_accs = []
+            masked_mat = F.normalize(torch.stack(masked_embeds), dim=-1)  # [N, D]
+            sims = masked_mat @ active_protos.T  # [N, C_active]
+            preds = sims.argmax(dim=1)  # [N]
+            gt = torch.tensor([active_idx[c] for c in cat_ids], dtype=torch.long)
+            acc = float((preds == gt).float().mean())
+            run_accs.append(acc)
 
-            correct_per_image = []
-            for i in range(n):
-                true_cat = cat_ids[i]
-                distractor_cats = [c for c in active if c != true_cat]
-                chosen = rng.choice(distractor_cats, size=K - 1, replace=False).tolist()
-                candidates = [true_cat] + chosen
-                cand_protos = prototypes[candidates]  # [K, D]
-                sims = (masked_embeds[i] @ cand_protos.T).squeeze(0)  # [K]
-                correct_per_image.append(1.0 if sims.argmax().item() == 0 else 0.0)
-            run_accs.append(np.mean(correct_per_image))
-
-        run_accs = np.array(run_accs)
-        proto_acc[L] = {"mean": float(run_accs.mean()), "std": float(run_accs.std())}
+        run_accs_arr = np.array(run_accs)
+        proto_acc[L] = {"mean": float(run_accs_arr.mean()), "std": float(run_accs_arr.std())}
         vis = get_visibility_ratio(L)
         print(f"    semantic [L={L}, vis={vis:.3f}] proto_acc={proto_acc[L]['mean']:.4f}"
-              f"±{proto_acc[L]['std']:.4f} (K={K}, {num_runs} runs)")
+              f"±{proto_acc[L]['std']:.4f} ({num_runs} runs, {len(active)} classes)")
 
     result: dict = {"prototype_acc": proto_acc}
 
-    # Step 5: CLIP K-choice zero-shot text matching
+    # Step 4: CLIP full-rank zero-shot text classification
     if encoder.name == "CLIP":
         print("    semantic: CLIP zero-shot text matching...")
         tokenizer = open_clip.get_tokenizer("ViT-B-16")
@@ -117,37 +117,36 @@ def evaluate_semantic(
         tokens = tokenizer(prompts).to(encoder.device)
         text_feats = encoder.model.encode_text(tokens)
         text_feats = F.normalize(text_feats.float().cpu(), dim=-1)  # [C, D]
+        active_text = text_feats[active]  # [C_active, D]
 
         zs_acc: dict = {}
         for L in levels:
-            masked_embeds = []
-            for i in range(n):
-                sample = dataset[i]
-                masked = mask_pil_image(
-                    sample["image_pil"], L, sample["seg_mask"], seed=seed, idx=i
-                )
-                embed = embed_pil(encoder, masked, transform)
-                masked_embeds.append(F.normalize(embed.unsqueeze(0), dim=-1))
-
-            run_accs = []
+            run_accs: list[float] = []
             for run in range(num_runs):
-                rng = np.random.RandomState(seed + run)
-                correct_per_image = []
+                seed_run = seed + run
+                masked_embeds = []
                 for i in range(n):
-                    true_cat = cat_ids[i]
-                    distractor_cats = [c for c in active if c != true_cat]
-                    chosen = rng.choice(distractor_cats, size=K - 1, replace=False).tolist()
-                    candidates = [true_cat] + chosen
-                    cand_text = text_feats[candidates]  # [K, D]
-                    sims = (masked_embeds[i] @ cand_text.T).squeeze(0)
-                    correct_per_image.append(1.0 if sims.argmax().item() == 0 else 0.0)
-                run_accs.append(np.mean(correct_per_image))
+                    sample = dataset[i]
+                    masked = mask_pil_image(
+                        sample["image_pil"], L, sample["seg_mask"],
+                        seed=seed_run, idx=i,
+                        patch_size=patch_size, target_size=img_size,
+                    )
+                    embed = embed_pil(encoder, masked, norm_transform)
+                    masked_embeds.append(embed)
 
-            run_accs = np.array(run_accs)
-            zs_acc[L] = {"mean": float(run_accs.mean()), "std": float(run_accs.std())}
+                masked_mat = F.normalize(torch.stack(masked_embeds), dim=-1)
+                sims = masked_mat @ active_text.T  # [N, C_active]
+                preds = sims.argmax(dim=1)
+                gt = torch.tensor([active_idx[c] for c in cat_ids], dtype=torch.long)
+                acc = float((preds == gt).float().mean())
+                run_accs.append(acc)
+
+            run_accs_arr = np.array(run_accs)
+            zs_acc[L] = {"mean": float(run_accs_arr.mean()), "std": float(run_accs_arr.std())}
             vis = get_visibility_ratio(L)
             print(f"    semantic [L={L}, vis={vis:.3f}] zeroshot_acc={zs_acc[L]['mean']:.4f}"
-                  f"±{zs_acc[L]['std']:.4f} (K={K}, {num_runs} runs)")
+                  f"±{zs_acc[L]['std']:.4f} ({num_runs} runs)")
         result["zeroshot_acc"] = zs_acc
 
     return result

@@ -7,16 +7,25 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 
 from models.encoder import BaseEncoder
+from models.processor import get_normalize_transform
 
-from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image
+from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image, prepare_seg_mask
 from src.utils import extract_patch_features, get_encoder_geometry
 
 
 def _segment_iou(
     encoder: BaseEncoder, masked_pil: Image.Image, gt_fg: np.ndarray,
+    norm_transform=None,
     return_mask: bool = False,
 ) -> float | tuple[float, ...]:
     """Run 2-means on pixel-level features (upsampled from patches), compute IoU vs GT foreground mask.
+
+    Args:
+        encoder: Vision encoder.
+        masked_pil: Masked image already at encoder's target resolution.
+        gt_fg: Binary foreground mask (center-cropped to match *masked_pil*).
+        norm_transform: Normalize-only transform for pre-prepared images.
+        return_mask: If True, also return the predicted binary mask.
 
     Returns:
         If return_mask=False: (iou, silhouette)
@@ -24,7 +33,7 @@ def _segment_iou(
     """
     import torch.nn.functional as F
 
-    patch_feats = extract_patch_features(encoder, masked_pil)  # [N, D]
+    patch_feats = extract_patch_features(encoder, masked_pil, transform=norm_transform)  # [N, D]
     N, D = patch_feats.shape
     gh = gw = int(round(N ** 0.5))
     if gh * gw != N:
@@ -73,7 +82,6 @@ def evaluate_gestalt(
     dataset,
     seed: int = 42,
     max_images: int | None = None,
-    num_choices: int = 5,
     num_runs: int = 3,
 ) -> dict:
     """Evaluate gestalt completion: mean IoU and silhouette score per masking level.
@@ -85,6 +93,7 @@ def evaluate_gestalt(
     ious = {L: [] for L in levels}
     sils = {L: [] for L in levels}
     img_size, patch_size = get_encoder_geometry(encoder)
+    norm_transform = get_normalize_transform(encoder.processor)
 
     n = min(len(dataset), max_images) if max_images else len(dataset)
     for L in levels:
@@ -94,11 +103,13 @@ def evaluate_gestalt(
                 sample = dataset[i]
                 pil = sample["image_pil"]
                 seg_mask = sample["seg_mask"]
-                gt_fg = (seg_mask > 0).astype(np.float32)
+                # Prepare GT at encoder resolution (same center-crop as masking)
+                gt_fg = (prepare_seg_mask(seg_mask, img_size) > 0).astype(np.float32)
 
                 masked = mask_pil_image(pil, L, seg_mask, seed=seed_run, idx=i,
                                         patch_size=patch_size, target_size=img_size)
-                iou, sil = _segment_iou(encoder, masked, gt_fg)
+                iou, sil = _segment_iou(encoder, masked, gt_fg,
+                                        norm_transform=norm_transform)
                 ious[L].append(iou)
                 sils[L].append(sil)
 

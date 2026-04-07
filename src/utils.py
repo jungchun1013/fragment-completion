@@ -102,16 +102,30 @@ _transform_cache: dict[str, object] = {}
 
 
 @torch.no_grad()
-def extract_patch_features(encoder: BaseEncoder, image_pil: Image.Image) -> torch.Tensor:
+def extract_patch_features(
+    encoder: BaseEncoder,
+    image_pil: Image.Image,
+    transform=None,
+) -> torch.Tensor:
     """Extract patch-level features from a single image.
 
-    Returns [N_patches, D] tensor (excluding CLS/prefix tokens).
+    Args:
+        encoder: Vision encoder.
+        image_pil: PIL image (should already be at encoder's target resolution
+                   if passing a normalize-only *transform*).
+        transform: Optional transform override. Pass a normalize-only transform
+                   (from ``get_normalize_transform``) for pre-prepared images.
+                   If None, uses the encoder's full transform (with resize/crop).
+
+    Returns:
+        [N_patches, D] tensor (excluding CLS/prefix tokens).
     """
-    enc_name = encoder.name
-    if enc_name not in _transform_cache:
-        from models.processor import to_transform
-        _transform_cache[enc_name] = to_transform(encoder.processor)
-    transform = _transform_cache[enc_name]
+    if transform is None:
+        enc_name = encoder.name
+        if enc_name not in _transform_cache:
+            from models.processor import to_transform
+            _transform_cache[enc_name] = to_transform(encoder.processor)
+        transform = _transform_cache[enc_name]
     img_t = transform(image_pil).unsqueeze(0).to(encoder.device)
 
     model = encoder.model
@@ -396,10 +410,12 @@ def plot_completion_summary(
     if gestalt:
         panels.append(("Gestalt (IoU)", gestalt, "IoU"))
     if mnemonic:
-        sim_data = {k: v["similarity"] for k, v in mnemonic.items()}
-        ret_data = {k: v["retrieval"] for k, v in mnemonic.items()}
-        panels.append(("Mnemonic (Similarity)", sim_data, "Cosine Sim"))
-        panels.append(("Mnemonic (Retrieval@1)", ret_data, "Accuracy"))
+        sim_data = {k: v["similarity"] for k, v in mnemonic.items() if "similarity" in v}
+        r1_data = {k: v["retrieval_r1"] for k, v in mnemonic.items() if "retrieval_r1" in v}
+        if sim_data:
+            panels.append(("Mnemonic (Similarity)", sim_data, "Cosine Sim"))
+        if r1_data:
+            panels.append(("Mnemonic (R@1)", r1_data, "R@1"))
     if semantic:
         proto_data = {k: v["prototype_acc"] for k, v in semantic.items()}
         panels.append(("Semantic (Prototype)", proto_data, "Accuracy"))
@@ -556,6 +572,106 @@ def plot_all_encoders_summary(
 # ---------------------------------------------------------------------------
 # I/O
 # ---------------------------------------------------------------------------
+
+def save_json(data: dict, path: Path) -> None:
+    """Save dict as JSON (compact utility for experiments)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=lambda o: round(float(o), 6)
+                  if isinstance(o, (np.floating, float)) else int(o)
+                  if isinstance(o, (np.integer,)) else o)
+
+
+def compute_retrieval_metrics(
+    query: torch.Tensor,
+    gallery: torch.Tensor,
+    gt_ids: torch.Tensor,
+) -> dict[str, float]:
+    """Compute R@1, R@5, MRR for query→gallery retrieval.
+
+    Args:
+        query: [N, D] L2-normalised query embeddings.
+        gallery: [M, D] L2-normalised gallery embeddings.
+        gt_ids: [N] ground-truth gallery index per query.
+
+    Returns:
+        Dict with recall_at_1, recall_at_5, mrr.
+    """
+    sims = query @ gallery.T  # [N, M]
+    ranks = sims.argsort(dim=1, descending=True)
+    n = query.shape[0]
+    r1 = r5 = mrr = 0.0
+    for i in range(n):
+        rank_list = ranks[i].tolist()
+        gt = int(gt_ids[i])
+        pos = rank_list.index(gt) if gt in rank_list else len(rank_list)
+        if pos < 1:
+            r1 += 1
+        if pos < 5:
+            r5 += 1
+        mrr += 1.0 / (pos + 1)
+    return {
+        "recall_at_1": r1 / n,
+        "recall_at_5": r5 / n,
+        "mrr": mrr / n,
+    }
+
+
+def compute_category_accuracy(
+    query: torch.Tensor,
+    prototypes: torch.Tensor,
+    gt_cat_ids: list[int],
+) -> float:
+    """Top-1 accuracy: query → nearest prototype matches gt category.
+
+    Args:
+        query: [N, D] query embeddings.
+        prototypes: [C, D] prototype embeddings (one per category).
+        gt_cat_ids: [N] ground-truth category index per query.
+
+    Returns:
+        Accuracy in [0, 1].
+    """
+    sims = query @ prototypes.T  # [N, C]
+    preds = sims.argmax(dim=1).tolist()
+    correct = sum(p == g for p, g in zip(preds, gt_cat_ids))
+    return correct / len(gt_cat_ids)
+
+
+def compute_exemplar_accuracy(
+    query: torch.Tensor,
+    gallery: torch.Tensor,
+    query_cats: list[int],
+    gallery_cats: list[int],
+    k: int = 10,
+) -> float:
+    """k-NN exemplar accuracy: majority vote among k nearest neighbours.
+
+    Args:
+        query: [N, D] query embeddings.
+        gallery: [M, D] gallery embeddings.
+        query_cats: [N] category id per query.
+        gallery_cats: [M] category id per gallery item.
+        k: Number of neighbours.
+
+    Returns:
+        Accuracy in [0, 1].
+    """
+    sims = query @ gallery.T  # [N, M]
+    _, topk_idx = sims.topk(k + 1, dim=1)  # +1 to skip self-match
+    n = query.shape[0]
+    correct = 0
+    for i in range(n):
+        neighbours = [gallery_cats[j] for j in topk_idx[i].tolist() if j != i][:k]
+        if not neighbours:
+            continue
+        # Majority vote
+        from collections import Counter
+        pred = Counter(neighbours).most_common(1)[0][0]
+        if pred == query_cats[i]:
+            correct += 1
+    return correct / n
+
 
 def save_results(results: dict, path: Path) -> None:
     """Save results dict as JSON with type conversion."""

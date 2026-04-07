@@ -10,9 +10,10 @@ import torch
 import torch.nn.functional as F
 
 from models.encoder import BaseEncoder
+from models.processor import get_normalize_transform
 
-from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image
-from src.utils import embed_pil
+from src.masking import get_mask_levels, get_visibility_ratio, mask_pil_image, prepare_image
+from src.utils import embed_pil, get_encoder_geometry
 
 
 @torch.no_grad()
@@ -23,18 +24,19 @@ def compute_similarity_analysis(encoder: BaseEncoder, dataset, seed: int = 42,
     Returns dict with keys: mnemonic_target, mnemonic_all,
     semantic_same_cat, semantic_all_cat. Each maps level -> {mean, std}.
     """
-    from models.processor import to_transform
-    transform = to_transform(encoder.processor)
+    img_size, patch_size = get_encoder_geometry(encoder)
+    norm_transform = get_normalize_transform(encoder.processor)
     levels = get_mask_levels()
     n = min(len(dataset), max_images) if max_images else len(dataset)
 
-    # Embed all complete images
+    # Embed all complete images (same spatial prep as masking)
     print(f"    Embedding {n} complete images...")
     complete_embeds = []
     cat_ids = []
     for i in range(n):
         sample = dataset[i]
-        complete_embeds.append(embed_pil(encoder, sample["image_pil"], transform))
+        pil = prepare_image(sample["image_pil"], img_size)
+        complete_embeds.append(embed_pil(encoder, pil, norm_transform))
         cat_ids.append(sample["scene_id"])
     complete_mat = F.normalize(torch.stack(complete_embeds), dim=-1)  # [N, D]
 
@@ -59,8 +61,9 @@ def compute_similarity_analysis(encoder: BaseEncoder, dataset, seed: int = 42,
         for i in range(n):
             sample = dataset[i]
             masked = mask_pil_image(sample["image_pil"], L, sample["seg_mask"],
-                                    seed=seed, idx=i)
-            masked_embeds.append(embed_pil(encoder, masked, transform))
+                                    seed=seed, idx=i,
+                                    patch_size=patch_size, target_size=img_size)
+            masked_embeds.append(embed_pil(encoder, masked, norm_transform))
         masked_mat = F.normalize(torch.stack(masked_embeds), dim=-1)  # [N, D]
 
         # Mnemonic: frag->target (paired) vs frag->all (average)
