@@ -39,30 +39,31 @@ _TAB20C = plt.cm.tab20c.colors
 
 # Task definitions: (candidate_keys, display_label, color)
 # candidate_keys supports old and new key names for backwards compatibility.
-# Blues: dark = conceptual, light = perceptual.
+# Greens: image-based retrieval, Cyan: text-based, Blues: categorization (dark→light = conceptual→perceptual)
 
-# All 6 tasks combined
+# All tasks combined
 RETRIEVAL_TASKS = [
-    # Retrieval
-    (["image_r1"],                         "Image Retrieval",         _TAB20C[9]),
-    (["exemplar_acc"],                     "Image k-NN Exemplar",     _TAB20C[3]),
-    (["instance_r1"],                      "Concept Retrieval",       _TAB20C[5]),
-    (["img_proto_acc"],                    "Image Mean Prototype",    _TAB20C[2]),
-    (["category_acc", "supercat_acc"],     "Category Retrieval",      _TAB20C[0]),
-    (["concept_proto_acc", "txt_proto_acc"], "Concept Mean Prototype", _TAB20C[1]),
+    (["image_r1"],        "Image Retrieval",         _TAB20C[8]),   # green
+    (["proto_r1"],        "Prototype Retrieval",     _TAB20C[10]),  # light green
+    (["instance_r1"],     "Text Retrieval",          "#17becf"),    # cyan
+    (["category_acc"],    "Category Retrieval",      _TAB20C[0]),   # dark blue
+    (["concept_proto_acc", "txt_proto_acc"], "Concept Mean Prototype", _TAB20C[1]),  # blue
+    (["img_proto_acc"],        "Image Mean Prototype",    _TAB20C[2]),   # light blue
+    (["exemplar_acc"],                     "Image k-NN Exemplar",     _TAB20C[3]),   # very light blue
 ]
 
 # Split views
 TASKS_RETRIEVAL = [
-    (["image_r1"],     "Image Retrieval",   _TAB20C[9]),
-    (["instance_r1"],  "Concept Retrieval", _TAB20C[5]),
+    (["image_r1"],                  "Image Retrieval",      _TAB20C[8]),   # green
+    (["proto_r1"], "Prototype Retrieval",  _TAB20C[10]),  # light green
+    (["instance_r1"],               "Text Retrieval",       "#17becf"),    # cyan
 ]
 
 TASKS_CATEGORIZATION = [
-    (["category_acc", "supercat_acc"],      "Category Retrieval",      _TAB20C[0]),
-    (["concept_proto_acc", "txt_proto_acc"], "Concept Mean Prototype", _TAB20C[1]),
-    (["img_proto_acc"],                     "Image Mean Prototype",    _TAB20C[2]),
-    (["exemplar_acc"],                      "Image k-NN Exemplar",     _TAB20C[3]),
+    (["category_acc", "supercat_acc"],      "Category Retrieval",      _TAB20C[0]),  # dark blue
+    (["concept_proto_acc", "txt_proto_acc"], "Concept Mean Prototype", _TAB20C[1]),  # blue
+    (["img_proto_acc"],         "Image Mean Prototype",    _TAB20C[2]),  # light blue
+    (["exemplar_acc"],                      "Image k-NN Exemplar",     _TAB20C[3]),  # very light blue
 ]
 
 
@@ -195,6 +196,107 @@ def plot_task_comparison(
     _plot_tasks(data, RETRIEVAL_TASKS, save_path, title)
 
 
+# k values to look for in JSON; the function gracefully picks whichever subset
+# is actually present in the data.
+_PROTO_K_CANDIDATES = (1, 2, 5, 10, 20)
+
+
+def plot_proto_k_sweep(
+    data: dict,
+    save_path: Path,
+    title: str = "Image Prototype k-sweep",
+    with_text: bool = False,
+) -> None:
+    """Plot per-instance image-prototype R@1 across masking levels for each k.
+
+    Two side-by-side panels (sharing y-axis):
+        Left  — exclude_target: prototype = mean of k random same-cat images,
+                excluding the query instance.
+        Right — include_target: prototype = mean of k images that always
+                contain the query instance + (k-1) random same-cat others.
+
+    One curve per k value, color-indexed by k position so the same k uses the
+    same color in both panels. With ``with_text=True``, ``text_r1`` is
+    overlaid as a dashed black reference curve in both panels.
+
+    Skips silently if no `img_proto_excl_k*_r1` keys are found in ``data``.
+    """
+    levels = get_mask_levels()
+    vis = [get_visibility_ratio(L) for L in levels]
+    first = data[str(levels[0])]
+
+    # Discover which k values are present.
+    excl_ks = [k for k in _PROTO_K_CANDIDATES
+               if f"img_proto_excl_k{k}_r1" in first]
+    incl_ks = [k for k in _PROTO_K_CANDIDATES
+               if f"img_proto_incl_k{k}_r1" in first]
+    if not excl_ks and not incl_ks:
+        print(f"  [skip] no img_proto_*_k*_r1 keys in data: {save_path.name}")
+        return
+
+    # Color per k position (shared between panels so same k -> same color).
+    color_for_k = {k: plt.cm.tab10.colors[i]
+                   for i, k in enumerate(_PROTO_K_CANDIDATES)}
+
+    w, h = PS["subplot_size"]
+    fig, axes = plt.subplots(
+        1, 2, figsize=(w * 2, h), sharey=True,
+    )
+    panels = [
+        (axes[0], "Exclude target", "img_proto_excl_k{k}_r1", excl_ks),
+        (axes[1], "Include target", "img_proto_incl_k{k}_r1", incl_ks),
+    ]
+
+    handles: list = []
+    seen_labels: set[str] = set()
+    for ax, panel_title, key_fmt, ks in panels:
+        for k in ks:
+            key = key_fmt.format(k=k)
+            vals = [data[str(L)][key] for L in levels]
+            label = f"k={k}"
+            h_, = ax.plot(
+                vis, vals,
+                marker=PS["marker"], markersize=PS["markersize"],
+                linewidth=PS["linewidth"], color=color_for_k[k], label=label,
+            )
+            if label not in seen_labels:
+                handles.append(h_)
+                seen_labels.add(label)
+
+        if with_text and "text_r1" in first:
+            text_vals = [data[str(L)]["text_r1"] for L in levels]
+            h_, = ax.plot(
+                vis, text_vals,
+                linestyle="--", linewidth=PS["linewidth"],
+                color="black", label="Text Retrieval",
+            )
+            if "Text Retrieval" not in seen_labels:
+                handles.append(h_)
+                seen_labels.add("Text Retrieval")
+
+        ax.set_title(panel_title, fontsize=PS["subplot_title_fontsize"])
+        ax.set_xlabel("Visibility Ratio", fontsize=PS["label_fontsize"])
+        ax.tick_params(labelsize=PS["tick_labelsize"], width=PS["tick_width"])
+        ax.set_ylim(-0.02, 1.05)
+        ax.grid(True, alpha=0.3)
+        for spine in ax.spines.values():
+            spine.set_linewidth(PS["tick_width"])
+
+    axes[0].set_ylabel("R@1", fontsize=PS["label_fontsize"])
+    fig.suptitle(title, fontsize=PS["suptitle_fontsize"], fontweight="bold")
+
+    fig.legend(
+        handles=handles, loc="lower center",
+        bbox_to_anchor=(0.5, -0.08),
+        ncol=min(len(handles), 6), fontsize=PS["legend_fontsize"], frameon=True,
+    )
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=PS["dpi"], bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
 def plot_retrieval_only(
     data: dict,
     save_path: Path,
@@ -246,6 +348,19 @@ def plot_retrieval(
         plot_task_comparison(data, retrieval_dir / f"task_comparison_{img_type}.png", t)
         plot_retrieval_only(data, retrieval_dir / f"retrieval_{img_type}.png", f"{t} — Retrieval")
         plot_categorization_only(data, retrieval_dir / f"categorization_{img_type}.png", f"{t} — Categorization")
+
+        if "img_proto_excl_k1_r1" in data[str(get_mask_levels()[0])]:
+            sweep_base = retrieval_dir / f"proto_k_sweep_{img_type}.png"
+            plot_proto_k_sweep(
+                data, sweep_base,
+                f"{t} — Image Prototype k-sweep",
+            )
+            plot_proto_k_sweep(
+                data,
+                sweep_base.with_name(f"proto_k_sweep_{img_type}+text.png"),
+                f"{t} — Image Prototype k-sweep (+ text retrieval)",
+                with_text=True,
+            )
 
 
 # ---------------------------------------------------------------------------
