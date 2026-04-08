@@ -624,6 +624,256 @@ def plot_subspace_retrieval(
     print(f"Saved {save_path}")
 
 
+def _patching_recovery_per_group(
+    payload: dict, level: int, group_image_ids: list[str],
+) -> tuple[list[int], list[float]]:
+    """Compute (L_patch list, recovery curve) for one image group at one level.
+
+    recovery(L_patch) = mean_g(correct_patched - correct_baseline)
+                      / max(eps, mean_g(correct_clean - correct_baseline))
+    """
+    image_ids = payload["image_ids"]
+    id_to_idx = {iid: i for i, iid in enumerate(image_ids)}
+    idx = np.array([id_to_idx[iid] for iid in group_image_ids if iid in id_to_idx])
+    if len(idx) == 0:
+        return list(range(payload["num_layers"])), [0.0] * payload["num_layers"]
+
+    correct_clean = np.array(payload["correct_clean"])[idx]
+    correct_baseline = np.array(
+        payload["correct_baseline_per_level"][level]
+        if level in payload["correct_baseline_per_level"]
+        else payload["correct_baseline_per_level"][str(level)]
+    )[idx]
+    patched_lookup = (
+        payload["correct_patched_per_level"][level]
+        if level in payload["correct_patched_per_level"]
+        else payload["correct_patched_per_level"][str(level)]
+    )
+    correct_patched = np.array(patched_lookup)[:, idx]  # [L_patch, n_g]
+
+    delta_clean = correct_clean.mean() - correct_baseline.mean()
+    eps = 1e-6
+    layers = list(range(payload["num_layers"]))
+    recovery = []
+    for L_patch in layers:
+        delta_patch = correct_patched[L_patch].mean() - correct_baseline.mean()
+        recovery.append(float(delta_patch / max(eps, delta_clean)))
+    return layers, recovery
+
+
+def _group_image_ids_by_dim(
+    payload: dict, dim: str,
+) -> dict[str, list[str]]:
+    """Return {bin_name: [image_ids]} for one concept dim, only labeled imgs."""
+    bins = payload["concept_bins"]
+    grouped: dict[str, list[str]] = {}
+    for iid, dims in bins.items():
+        b = dims.get(dim)
+        if b is None:
+            continue
+        grouped.setdefault(b, []).append(iid)
+    return grouped
+
+
+def plot_patching_recovery_curves(
+    payload: dict, save_path: Path, level_to_show: int = 4,
+) -> None:
+    """1×3 panels (color/material/function) — recovery vs L_patch.
+
+    One curve per concept bin within each dim, plus a thick black "all
+    images" reference line. Single representative L_mask (default L=4,
+    mid-corruption). The headline figure for "where does each concept
+    enter the residual stream" — bins should reach high recovery at
+    progressively later L_patch as we move from color → material → function.
+    """
+    model_name = payload.get("model", "?")
+    num_layers = payload["num_layers"]
+    vis = payload["vis_per_level"].get(level_to_show) or \
+          payload["vis_per_level"].get(str(level_to_show))
+
+    fig_w = PS["subplot_size"][0] * len(DIM_ORDER) + 1.0
+    fig, axes = plt.subplots(1, len(DIM_ORDER), figsize=(fig_w, 5.5),
+                             sharey=True)
+
+    all_image_ids = payload["image_ids"]
+    layers_all, recov_all = _patching_recovery_per_group(
+        payload, level_to_show, all_image_ids,
+    )
+
+    for ax, dim in zip(axes, DIM_ORDER):
+        groups = _group_image_ids_by_dim(payload, dim)
+        if not groups:
+            ax.set_title(f"{dim} (no labels)")
+            ax.axis("off")
+            continue
+        # Sort bins by group size for consistent color use
+        sorted_bins = sorted(groups.items(), key=lambda kv: -len(kv[1]))
+        n_bins = len(sorted_bins)
+        cmap = plt.get_cmap("tab20", max(n_bins, 1))
+
+        for i, (bin_name, ids) in enumerate(sorted_bins):
+            if len(ids) < 5:
+                continue  # too few to be meaningful
+            layers, recov = _patching_recovery_per_group(
+                payload, level_to_show, ids,
+            )
+            ax.plot(
+                layers, recov,
+                marker=PS["marker"], markersize=PS["markersize"] - 2,
+                linewidth=PS["linewidth"] - 0.5, color=cmap(i),
+                label=f"{bin_name} (n={len(ids)})", alpha=0.85,
+            )
+
+        # Overall reference line
+        ax.plot(
+            layers_all, recov_all,
+            color="black", linewidth=PS["linewidth"] + 1.0,
+            marker=PS["marker"], markersize=PS["markersize"],
+            label="all", zorder=10,
+        )
+
+        ax.axhline(0, color="gray", linewidth=0.6, alpha=0.4)
+        ax.axhline(1, color="gray", linewidth=0.6, alpha=0.4, linestyle=":")
+        ax.set_xlabel("L_patch", fontsize=PS["label_fontsize"])
+        ax.set_title(dim, fontsize=PS["subplot_title_fontsize"])
+        ax.tick_params(labelsize=PS["tick_labelsize"])
+        ax.set_xticks(range(0, num_layers, max(1, num_layers // 8)))
+        ax.set_xlim(-0.5, num_layers - 0.5)
+        ax.set_ylim(-0.2, 1.2)
+        ax.grid(True, alpha=0.3)
+        ax.legend(
+            loc="lower center", bbox_to_anchor=(0.5, -0.55),
+            ncol=2, fontsize=PS["legend_fontsize"] - 4, frameon=False,
+        )
+
+    axes[0].set_ylabel("Recovery rate", fontsize=PS["label_fontsize"])
+    fig.suptitle(
+        f"Activation patching recovery — {model_name} "
+        f"@ L_mask={level_to_show} (vis={vis:.2f})",
+        fontsize=PS["suptitle_fontsize"],
+    )
+    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=PS["dpi"])
+    plt.close(fig)
+    print(f"Saved {save_path}")
+
+
+def plot_patching_dim_means(
+    payload: dict, save_path: Path,
+) -> None:
+    """Per-dim mean recovery curve at one canonical level (default L=4).
+
+    Aggregates across all bins of a dim to give the headline 3-curve
+    figure for the early/mid/late inflection story.
+    """
+    model_name = payload.get("model", "?")
+    num_layers = payload["num_layers"]
+
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5), sharey=True)
+    levels_to_show = [2, 4, 6, 8]
+    colors = plt.cm.tab10.colors
+
+    for ax, level in zip(axes, levels_to_show):
+        vis = payload["vis_per_level"].get(level) or \
+              payload["vis_per_level"].get(str(level))
+        for di, dim in enumerate(DIM_ORDER):
+            groups = _group_image_ids_by_dim(payload, dim)
+            ids = [iid for bin_ids in groups.values() for iid in bin_ids]
+            layers, recov = _patching_recovery_per_group(
+                payload, level, ids,
+            )
+            ax.plot(
+                layers, recov,
+                marker=PS["marker"], markersize=PS["markersize"],
+                linewidth=PS["linewidth"], color=colors[di], label=dim,
+            )
+        ax.axhline(0, color="gray", linewidth=0.6, alpha=0.4)
+        ax.axhline(1, color="gray", linewidth=0.6, alpha=0.4, linestyle=":")
+        ax.set_xlabel("L_patch", fontsize=PS["label_fontsize"])
+        ax.set_title(f"L_mask={level} (vis={vis:.2f})",
+                     fontsize=PS["subplot_title_fontsize"])
+        ax.tick_params(labelsize=PS["tick_labelsize"])
+        ax.set_xticks(range(0, num_layers, max(1, num_layers // 6)))
+        ax.set_xlim(-0.5, num_layers - 0.5)
+        ax.set_ylim(-0.1, 1.1)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="lower right", fontsize=PS["legend_fontsize"] - 2,
+                  frameon=False)
+
+    axes[0].set_ylabel("Recovery rate", fontsize=PS["label_fontsize"])
+    fig.suptitle(
+        f"Activation patching: per-dim recovery vs L_patch — {model_name}",
+        fontsize=PS["suptitle_fontsize"],
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=PS["dpi"])
+    plt.close(fig)
+    print(f"Saved {save_path}")
+
+
+def plot_patching_heatmap(
+    payload: dict, save_path: Path,
+) -> None:
+    """L_mask × L_patch heatmap of recovery, one panel per dim (overall).
+
+    Shows the diagonal-ish pattern: recovery saturates at later L_patch as
+    L_mask decreases. Aggregated over all images in each dim (no per-bin
+    breakdown — that's the recovery_curves figure).
+    """
+    model_name = payload.get("model", "?")
+    num_layers = payload["num_layers"]
+    levels = sorted(int(k) for k in payload["correct_baseline_per_level"])
+
+    fig, axes = plt.subplots(1, len(DIM_ORDER), figsize=(15, 5),
+                             sharey=True)
+
+    vmin, vmax = -0.2, 1.0
+    im = None
+    for ax, dim in zip(axes, DIM_ORDER):
+        groups = _group_image_ids_by_dim(payload, dim)
+        ids = [iid for bin_ids in groups.values() for iid in bin_ids]
+        if not ids:
+            ax.set_title(f"{dim} (empty)")
+            ax.axis("off")
+            continue
+
+        matrix = np.zeros((len(levels), num_layers))
+        for li, level in enumerate(levels):
+            _, recov = _patching_recovery_per_group(payload, level, ids)
+            matrix[li] = recov
+
+        im = ax.imshow(
+            matrix, aspect="auto", cmap="RdBu_r",
+            vmin=vmin, vmax=vmax, interpolation="nearest", origin="lower",
+        )
+        ax.set_xticks(range(0, num_layers, max(1, num_layers // 8)))
+        ax.set_yticks(range(len(levels)))
+        ax.set_yticklabels([
+            f"L{L} ({payload['vis_per_level'].get(L, payload['vis_per_level'].get(str(L), 0)):.2f})"
+            for L in levels
+        ])
+        ax.set_xlabel("L_patch", fontsize=PS["label_fontsize"])
+        ax.set_title(dim, fontsize=PS["subplot_title_fontsize"])
+        ax.tick_params(labelsize=PS["tick_labelsize"] - 2)
+
+    axes[0].set_ylabel("L_mask (vis ratio)", fontsize=PS["label_fontsize"])
+    if im is not None:
+        cbar = fig.colorbar(im, ax=axes, fraction=0.025, pad=0.02)
+        cbar.set_label("Recovery rate", fontsize=PS["label_fontsize"])
+        cbar.ax.tick_params(labelsize=PS["tick_labelsize"] - 2)
+
+    fig.suptitle(
+        f"Patching recovery heatmap — {model_name}",
+        fontsize=PS["suptitle_fontsize"],
+    )
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=PS["dpi"], bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved {save_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Plot CAV training and ablation results.",
@@ -647,6 +897,10 @@ def main() -> None:
     parser.add_argument(
         "--retrieval", type=Path,
         default=Path("results/exp3/cav_subspace_retrieval_clip_L14.json"),
+    )
+    parser.add_argument(
+        "--patch", type=Path,
+        default=Path("results/exp3/cav_patch_clip_L14.pt"),
     )
     parser.add_argument(
         "--out-dir", type=Path, default=Path("results/exp3"),
@@ -692,6 +946,22 @@ def main() -> None:
         plot_subspace_retrieval(
             args.retrieval,
             args.out_dir / "cav_subspace_retrieval_clip_L14.png",
+        )
+
+    if args.patch.exists():
+        patch_payload = torch.load(args.patch, weights_only=False)
+        plot_patching_recovery_curves(
+            patch_payload,
+            args.out_dir / "cav_patch_recovery_clip_L14.png",
+            level_to_show=4,
+        )
+        plot_patching_dim_means(
+            patch_payload,
+            args.out_dir / "cav_patch_dim_means_clip_L14.png",
+        )
+        plot_patching_heatmap(
+            patch_payload,
+            args.out_dir / "cav_patch_heatmap_clip_L14.png",
         )
 
 
